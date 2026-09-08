@@ -60,16 +60,27 @@ export async function reconcileInterruptedSkillProposalApply(params: {
       if (!recovery) {
         return false;
       }
-      if (
-        !params.store.agentId ||
-        resolveWorkshopTargetRoot({
-          ...params.store,
-          agentId: params.store.agentId,
-          target: stored.record.target,
-        }) !== params.skillsRoot
-      ) {
-        return false;
-      }
+      // Doctor supplies a checked historical workspace root for legacy recovery.
+      // Only repository-owned names add the current grant check to that contract.
+      const repositoryOwned =
+        stored.record.target.source === "repository" ||
+        params.store.config.skills?.workshop?.repository?.writableSkills.includes(
+          stored.record.target.skillKey,
+        );
+      const assertRepositoryGrant = () => {
+        if (
+          repositoryOwned &&
+          (!params.store.agentId ||
+            resolveWorkshopTargetRoot({
+              ...params.store,
+              agentId: params.store.agentId,
+              target: stored.record.target,
+            }) !== params.skillsRoot)
+        ) {
+          throw new Error("Workshop repository recovery no longer matches its ownership grant.");
+        }
+      };
+      assertRepositoryGrant();
       if (recovery.state === "proposed") {
         const now = new Date().toISOString();
         const applied: SkillProposalRecord = {
@@ -110,11 +121,7 @@ export async function reconcileInterruptedSkillProposalApply(params: {
           mode: stored.record.kind,
         });
         try {
-          resolveWorkshopTargetRoot({
-            ...params.store,
-            agentId: params.store.agentId,
-            target: stored.record.target,
-          });
+          assertRepositoryGrant();
           await restoreWorkspaceSkillMutation(restoration);
         } finally {
           // Restoration attempts can partially succeed before reporting an

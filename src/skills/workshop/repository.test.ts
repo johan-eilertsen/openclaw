@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  inspectLegacySkillWorkshopMigration,
+  migrateLegacySkillWorkshopProposals,
+} from "../../commands/doctor-skill-workshop-sqlite.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   createOpenClawTestState,
@@ -19,6 +23,7 @@ import {
   reviseSkillProposal,
 } from "./service.js";
 import { writeSkillProposalRollback } from "./store-sqlite-rollback.js";
+import { importLegacySkillProposal, readSkillProposalRecord } from "./store.js";
 import { SKILL_WORKSHOP_ROLLBACK_SCHEMA } from "./types.js";
 import { listWritableWorkshopSkillSummaries } from "./workspace-skill-read.js";
 
@@ -54,6 +59,64 @@ function options() {
 }
 
 describe("Workshop repository source", () => {
+  it.each([false, true])("survives CLI legacy migration with revoked grant=%s", async (revoked) => {
+    const proposal = await proposeUpdateSkill({
+      ...options(),
+      skillName: "release-review",
+      content: "# Review\nKeep repository ownership.\n",
+    });
+    const migrationConfig = revoked ? {} : config;
+    expect(
+      (await inspectLegacySkillWorkshopMigration({ config: migrationConfig, env: state.env }))
+        .externalProposalCount,
+    ).toBe(0);
+    await migrateLegacySkillWorkshopProposals({ config: migrationConfig, env: state.env });
+    expect((await inspectSkillProposal(proposal.record.id, options()))?.record.status).toBe(
+      "pending",
+    );
+    expect(await fs.readFile(source, "utf8")).toBe(original);
+    await applySkillProposal({ ...options(), proposalId: proposal.record.id });
+    expect(await fs.readFile(source, "utf8")).toContain("Keep repository ownership.");
+  });
+
+  it("keeps legacy claims for reserved names out of canonical relocation", async () => {
+    const proposal = await proposeUpdateSkill({
+      ...options(),
+      skillName: "release-review",
+      content: "# Review\nCanonical proposal.\n",
+    });
+    const legacyDir = path.join(repository, "legacy", "skills", "release-review");
+    await fs.mkdir(legacyDir, { recursive: true });
+    const legacyFile = path.join(legacyDir, "SKILL.md");
+    await fs.writeFile(legacyFile, original);
+    const legacy = {
+      ...proposal.record,
+      id: "legacy-review-20260908-1234567890",
+      kind: "create" as const,
+      status: "applied" as const,
+      appliedAt: proposal.record.createdAt,
+      draftHash: hashSkillProposalContent(original),
+      target: {
+        ...proposal.record.target,
+        skillDir: legacyDir,
+        skillFile: legacyFile,
+        source: "openclaw-workspace",
+      },
+    };
+    importLegacySkillProposal({ record: legacy, ownerAgentId: "main", store: { env: state.env } });
+    await migrateLegacySkillWorkshopProposals({ config, env: state.env });
+    const preserved = await readSkillProposalRecord(
+      legacy.id,
+      options(),
+      { agentId: "main" },
+      { config },
+    );
+    expect(preserved).toMatchObject({ status: "stale", target: legacy.target });
+    expect(preserved?.statusReason).toContain("history only");
+    expect(await fs.readFile(source, "utf8")).toBe(original);
+    expect(await fs.readFile(legacyFile, "utf8")).toBe(original);
+  });
+
   it("updates canonical source through propose, revise, apply and inspect without writing consumers", async () => {
     const consumer = path.join(repository, "consumer", "release-review", "SKILL.md");
     await fs.mkdir(path.dirname(consumer), { recursive: true });

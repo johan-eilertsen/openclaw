@@ -174,7 +174,14 @@ async function relocateLegacyWorkshopTargets(
   // Recovery can establish a create's ownership or restore a partial update.
   for (const row of readRows()) {
     const record = parseSkillProposalRow(row);
-    if (!record || record.status !== "pending") {
+    // Canonical proposals and names reserved by the repository grant are outside
+    // legacy workspace recovery. Preserve their rollback facts for Workshop.
+    if (
+      !record ||
+      record.status !== "pending" ||
+      record.target.source === "repository" ||
+      config.skills?.workshop?.repository?.writableSkills.includes(record.target.skillKey)
+    ) {
       continue;
     }
     if (retireMissingDrafts) {

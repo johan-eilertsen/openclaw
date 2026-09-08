@@ -234,7 +234,13 @@ export function classifyWorkshopRelocation(
   deferredSources: ReadonlySet<string> = new Set(),
 ) {
   const candidates = records.flatMap<WorkshopRelocationPlan>((entry) => {
-    if (entry.record.status !== "pending" && entry.record.status !== "applied") {
+    // Repository proposals already bind their canonical source. They are not legacy
+    // workspace ownership claims, even after a grant is revoked or an owner removed.
+    // Workshop apply/recovery revalidates those grants; Doctor must not retarget them.
+    if (
+      entry.record.target.source === "repository" ||
+      (entry.record.status !== "pending" && entry.record.status !== "applied")
+    ) {
       return [];
     }
     const source = path.resolve(entry.record.target.skillDir);
@@ -305,7 +311,11 @@ export async function planWorkshopRelocation(
   const relocations = new Map<string, WorkshopRelocation>();
   for (const plan of external) {
     plan.deferred ||= Boolean(plan.workspaceDir && deferredWorkspaces.has(plan.workspaceDir));
-    if (!plan.ownerAgentId || (plan.record.status === "applied" && !plan.workspaceDir)) {
+    if (
+      config.skills?.workshop?.repository?.writableSkills.includes(plan.record.target.skillKey) ||
+      !plan.ownerAgentId ||
+      (plan.record.status === "applied" && !plan.workspaceDir)
+    ) {
       continue;
     }
     const target = resolveSkillProposalTarget({
@@ -485,6 +495,9 @@ export async function planWorkshopRelocation(
         record: staleWorkshopProposal(
           record,
           conflictReason ??
+            (config.skills?.workshop?.repository?.writableSkills.includes(record.target.skillKey)
+              ? "Legacy proposals for repository-owned names are history only; create a new repository proposal."
+              : undefined) ??
             (ownerAgentId
               ? "Skill Workshop could not identify the legacy workspace; the path stays in place and the proposal is stale."
               : plan.unconfiguredOwnerAgentId
