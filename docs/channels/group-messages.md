@@ -25,7 +25,7 @@ Goal: let OpenClaw sit in WhatsApp groups, wake up only when pinged, and keep th
 - Context injection: **pending-only** group messages (default 50) that _did not_ trigger a run are prefixed under `[Chat messages since your last reply - for context]`, with the triggering line under `[Current message - respond to this]`. The pending window is cleared after the run; messages already in the session are not re-injected.
 - Sender attribution: each group line carries the sender label inside the message envelope, e.g. `[WhatsApp <groupJid> <timestamp>] Alice (+447700900123): text`, and sender identity plus group subject/members ride along in the untrusted conversation-metadata block.
 - Ephemeral/view-once: wrappers are unwrapped before extracting text/mentions, so pings inside them still trigger.
-- Group system prompt: the first turn of a group session (and any turn after `/activation` changes the mode) injects activation guidance into the system prompt (`Activation: trigger-only ...` or `Activation: always-on ...`, plus "address the specific sender"). Persistent group-chat delivery guidance ("You are in a WhatsApp group chat...") is always included.
+- Group system prompt: the first turn of a group session (and any turn after `/activation` changes the mode) injects activation guidance into the system prompt (`Activation: trigger-only ...` or `Activation: always-on ...`). It tells the agent to use sender information to identify the message it is answering, without addressing the sender by name unless needed. Persistent group-chat delivery guidance ("You are in a WhatsApp group chat...") is always included.
 
 ## Config example (WhatsApp)
 

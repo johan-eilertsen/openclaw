@@ -191,7 +191,7 @@ export function buildGroupIntro(params: {
 }): string {
   const activation = normalizeGroupActivation(params.activation) ?? params.defaultActivation;
   if (activation === "always") {
-    return "Activation: always-on (you receive every group message). You see every message; most need no response. When you do reply, address the specific sender noted in the message context.";
+    return "Activation: always-on (you receive every group message). You see every message; most need no response. When you do reply, use sender information to identify the message you are answering; do not address the sender by name unless needed.";
   }
-  return "Activation: trigger-only (you are invoked only when explicitly mentioned; recent context may be included). Address the specific sender noted in the message context.";
+  return "Activation: trigger-only (you are invoked only when explicitly mentioned; recent context may be included). Use sender information to identify the message you are answering; do not address the sender by name unless needed.";
 }

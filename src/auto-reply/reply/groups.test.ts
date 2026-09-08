@@ -100,7 +100,21 @@ describe("group runtime loading", () => {
       isolatedGroups.buildGroupIntro({
         defaultActivation: "always",
       }),
-    ).toContain("You see every message; most need no response. When you do reply");
+    ).toContain(
+      "You see every message; most need no response. When you do reply, use sender information to identify the message you are answering; do not address the sender by name unless needed.",
+    );
+    expect(
+      isolatedGroups.buildGroupIntro({
+        defaultActivation: "mention",
+      }),
+    ).toContain(
+      "Use sender information to identify the message you are answering; do not address the sender by name unless needed.",
+    );
+    expect(
+      isolatedGroups.buildGroupIntro({
+        defaultActivation: "always",
+      }),
+    ).not.toContain("address the specific sender noted in the message context");
     expect(
       isolatedGroups.buildGroupIntro({
         activation: "mention",
