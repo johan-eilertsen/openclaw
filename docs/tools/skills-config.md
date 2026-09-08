@@ -418,7 +418,10 @@ layouts.
 
 Skill Workshop uses each agent's `<state-dir>/agents/<agentId>/agent/workshop-skills`
 containment boundary. It does not use `allowSymlinkTargets`, and it rejects
-symlinked skills that resolve outside that directory.
+symlinked skills that resolve outside that directory. An explicit
+[`skills.workshop.repository` ownership grant](/tools/skill-workshop#repository-owned-skills)
+also permits updates to named canonical repository skills. This does not add
+the repository to discovery or make consumer copies writable.
 
 Managed `~/.openclaw/skills` and personal `~/.agents/skills` directories
 already accept skill-directory symlinks unconditionally (per-skill

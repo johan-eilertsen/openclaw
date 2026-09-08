@@ -2,22 +2,31 @@ import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { resolveSkillStatusEntry } from "../discovery/status.js";
-import {
-  assertInsideSkillsRoot,
-  readWorkspaceSkillFile,
-} from "../lifecycle/workspace-skill-write.js";
+import { readWorkspaceSkillFile } from "../lifecycle/workspace-skill-write.js";
 import { resolveSkillManifestMetadata } from "../loading/frontmatter.js";
 import type { Skill } from "../loading/skill-contract.js";
 import { loadSkillRootRecords, warnInvalidSkill } from "../loading/skill-root-loader.js";
+import { resolveWorkshopRepositoryRoot, resolveWorkshopTargetRoot } from "./repository.js";
 import { resolveWorkshopSkillsDir } from "./skills-root.js";
 
 function assertWritableSkillTarget(
-  skill: Pick<Skill, "baseDir" | "filePath" | "name">,
+  skill: Pick<Skill, "baseDir" | "filePath" | "name"> & { source?: string },
   options: WorkshopSkillReadOptions,
 ): void {
-  const skillsRoot = workshopSkillsDir(options);
-  assertInsideSkillsRoot(skillsRoot, skill.filePath, "skill file");
-  assertInsideSkillsRoot(skillsRoot, skill.baseDir, "skill directory");
+  if (!options.agentId) {
+    throw new Error("Skill Workshop requires the active agent id.");
+  }
+  resolveWorkshopTargetRoot({
+    ...options,
+    agentId: options.agentId,
+    target: {
+      skillName: skill.name,
+      skillKey: skill.name,
+      skillDir: skill.baseDir,
+      skillFile: skill.filePath,
+      source: skill.source,
+    },
+  });
   if (path.basename(skill.filePath) !== "SKILL.md") {
     throw new Error("Skill Workshop can only update SKILL.md targets.");
   }
@@ -29,6 +38,7 @@ export type WritableWorkshopSkillSummary = {
   description: string;
   baseDir: string;
   filePath: string;
+  source?: string;
 };
 
 export type WorkshopSkillReadOptions = {
@@ -64,6 +74,32 @@ export function listWritableWorkshopSkillSummaries(
       }
     },
   });
+  const repository = options.config.skills?.workshop?.repository;
+  if (repository && repository.ownerAgentId === options.agentId) {
+    const repositoryRoot = resolveWorkshopRepositoryRoot(repository);
+    const repositoryRecords = loadSkillRootRecords({
+      dir: repositoryRoot,
+      source: "repository",
+      config: options.config,
+      onDiagnostic: (diagnostic) => {
+        if (diagnostic.kind === "read") {
+          throw new Error("Workshop repository skills could not be read.");
+        }
+      },
+    }).filter(
+      ({ skill }) =>
+        repository.writableSkills.includes(skill.name) &&
+        skill.baseDir === path.join(repositoryRoot, skill.name),
+    );
+    for (const record of repositoryRecords) {
+      if (records.some(({ skill }) => skill.name === record.skill.name)) {
+        throw new Error(
+          "Workshop repository skill collides with an agent-local skill; reconcile ownership before updating.",
+        );
+      }
+    }
+    records.push(...repositoryRecords);
+  }
   return records
     .map(({ skill, frontmatter }) => ({
       name: skill.name,
@@ -71,6 +107,7 @@ export function listWritableWorkshopSkillSummaries(
       description: skill.description,
       baseDir: skill.baseDir,
       filePath: skill.filePath,
+      ...(skill.source === "repository" ? { source: "repository" } : {}),
     }))
     .toSorted((left, right) => left.name.localeCompare(right.name));
 }
@@ -94,6 +131,7 @@ export async function readWritableWorkshopSkill(
   content: string;
   baseDir: string;
   description: string;
+  source?: string;
 }> {
   const name = normalizeOptionalString(skillName);
   if (!name) {
@@ -102,7 +140,7 @@ export async function readWritableWorkshopSkill(
   const targetSkill = resolveWritableWorkshopSkillSummary(name, options);
   if (!targetSkill) {
     throw new Error(
-      `Skill Workshop can only update skills it generated. No Workshop-generated skill matched: ${name}. Create it as a new skill, or edit the file directly.`,
+      `No Workshop-generated skill matched: ${name}, and no authorized repository skill matched. Check the configured repository owner and writableSkills; do not create a consumer duplicate.`,
     );
   }
   assertWritableSkillTarget(targetSkill, options);
@@ -117,5 +155,6 @@ export async function readWritableWorkshopSkill(
     content,
     baseDir: targetSkill.baseDir,
     description: targetSkill.description,
+    ...(targetSkill.source ? { source: targetSkill.source } : {}),
   };
 }

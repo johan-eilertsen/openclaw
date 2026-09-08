@@ -11,6 +11,7 @@ import { bumpSkillsSnapshotVersion } from "../runtime/refresh-state.js";
 import { stripProposalFrontmatterForSkill } from "./frontmatter.js";
 import { createSkillProposalEvent } from "./plugin-hooks.js";
 import { hashSkillProposalContent } from "./proposal-hash.js";
+import { resolveWorkshopTargetRoot } from "./repository.js";
 import { readStoredProposal } from "./store-sqlite-record.js";
 import { clearSkillProposalRollback, readSkillProposalRollback } from "./store-sqlite-rollback.js";
 import type { SkillWorkshopDirectoryStoreOptions } from "./store-sqlite-schema.js";
@@ -59,6 +60,16 @@ export async function reconcileInterruptedSkillProposalApply(params: {
       if (!recovery) {
         return false;
       }
+      if (
+        !params.store.agentId ||
+        resolveWorkshopTargetRoot({
+          ...params.store,
+          agentId: params.store.agentId,
+          target: stored.record.target,
+        }) !== params.skillsRoot
+      ) {
+        return false;
+      }
       if (recovery.state === "proposed") {
         const now = new Date().toISOString();
         const applied: SkillProposalRecord = {
@@ -99,6 +110,11 @@ export async function reconcileInterruptedSkillProposalApply(params: {
           mode: stored.record.kind,
         });
         try {
+          resolveWorkshopTargetRoot({
+            ...params.store,
+            agentId: params.store.agentId,
+            target: stored.record.target,
+          });
           await restoreWorkspaceSkillMutation(restoration);
         } finally {
           // Restoration attempts can partially succeed before reporting an

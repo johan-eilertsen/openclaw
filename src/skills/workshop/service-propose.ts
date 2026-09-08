@@ -108,7 +108,7 @@ export async function proposeCreateSkill(
       skillKey: target.skillKey,
       skillDir: target.skillDir,
       skillFile: target.skillFile,
-      source: "openclaw-workshop",
+      source: target.source ?? "openclaw-workshop",
     },
   });
 }
@@ -191,7 +191,7 @@ export async function proposeUpdateSkill(
       skillKey: target.skillKey,
       skillDir: target.baseDir,
       skillFile: target.skillFile,
-      source: "openclaw-workshop",
+      source: target.source ?? "openclaw-workshop",
       currentContentHash: hashSkillProposalContent(currentContent),
     },
   });

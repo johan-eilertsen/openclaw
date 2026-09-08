@@ -18,6 +18,7 @@ import { resolveSkillProposalName } from "./frontmatter.js";
 import { createSkillProposalEvent, dispatchSkillProposalChanged } from "./plugin-hooks.js";
 import { nextProposalVersion, prepareSkillProposalDraft } from "./proposal-draft.js";
 import { createSkillProposalGenerationDraftFile } from "./proposal-generation.js";
+import { resolveWorkshopTargetRoot } from "./repository.js";
 import { hashSkillProposalRevision } from "./revision-hash.js";
 import {
   assertExpectedRevisionHash,
@@ -30,7 +31,6 @@ import {
   normalizeProposalOrigin,
 } from "./service-propose.js";
 import { readRequiredProposal } from "./service-query.js";
-import { resolveWorkshopSkillsDir } from "./skills-root.js";
 import {
   hashSkillProposalContent,
   readSkillProposalRecord,
@@ -72,17 +72,6 @@ function proposalStoreOptions(
   return { ...(env ? { env } : {}), agentId, config };
 }
 
-function workshopSkillsDir(input: {
-  config: OpenClawConfig;
-  agentId?: string;
-  env?: NodeJS.ProcessEnv;
-}): string {
-  if (!input.agentId) {
-    throw new Error("Skill Workshop requires the active agent id.");
-  }
-  return resolveWorkshopSkillsDir(input.config, input.agentId, input.env);
-}
-
 const APPLY_TRANSITION_DEPENDENCIES = {
   assertExpectedRevisionHash,
   evaluateSkillProposal,
@@ -106,7 +95,14 @@ export async function reviseSkillProposal(
   const config = resolveSkillWorkshopConfig(input.config);
   const revision = withPendingSkillProposalRevision(input, async (read) => {
     const { record } = read;
-    const skillsRoot = workshopSkillsDir(input);
+    if (!input.agentId) {
+      throw new Error("Skill Workshop requires the active agent id.");
+    }
+    const skillsRoot = resolveWorkshopTargetRoot({
+      ...input,
+      agentId: input.agentId,
+      target: record.target,
+    });
     assertInsideSkillsRoot(skillsRoot, record.target.skillFile, "skill file");
     assertInsideSkillsRoot(skillsRoot, record.target.skillDir, "skill directory");
 

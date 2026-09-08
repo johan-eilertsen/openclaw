@@ -1085,7 +1085,9 @@ export function registerSkillsCli(program: Command) {
 
   workshop
     .command("propose-update")
-    .description("Create a pending proposal for an existing Workshop-generated skill")
+    .description(
+      "Create a pending proposal for a Workshop-generated or authorized repository skill",
+    )
     .argument("<skill>", "Skill name or key")
     .option("--proposal <path>", "Path to PROPOSAL.md draft content")
     .option(
@@ -1159,7 +1161,8 @@ export function registerSkillsCli(program: Command) {
         opts,
         command,
         (resolved) => runSkillProposalApply(resolved, proposalId),
-        (applied) => `Applied ${applied.record.id} -> ${applied.targetSkillFile}\n`,
+        (applied) =>
+          `Applied ${applied.record.id} -> ${applied.targetSkillFile}\n${applied.record.target.source === "repository" ? "Source updated. Validate, commit, publish and verify the repository catalog before runtime activation.\n" : ""}`,
       ),
     );
 

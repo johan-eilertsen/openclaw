@@ -499,6 +499,14 @@ export const RUNTIME_FIELD_HELP: Record<string, string> = {
     "Trusted real target roots that skill symlinks may resolve into when they sit outside their configured source root. Keep this narrow, such as a sibling repo skills directory.",
   "skills.load.watch":
     "Enable filesystem watching for skill-definition changes so updates can be applied without full process restart. Keep enabled in development workflows and disable in immutable production images.",
+  "skills.workshop.repository":
+    "Optional operator-owned Git source for Workshop updates. Grants writing only to the configured owner agent and named skills; runtime loading still uses published consumers.",
+  "skills.workshop.repository.path":
+    "Absolute canonical Git checkout path containing a real skills directory. Never point this at a published consumer or a third-party source.",
+  "skills.workshop.repository.ownerAgentId":
+    "Agent authorized to update this repository through Workshop. Other agents cannot write the source and should route changes to this owner.",
+  "skills.workshop.repository.writableSkills":
+    "Explicit skill directory names the operator owns and authorizes Workshop to update. Names are reserved against agent-local duplicate creation; removing a name revokes pending apply and recovery authority.",
   "skills.workshop.autonomous.mode":
     'Controls background learning: "off" keeps only the suggestion nudge, "propose" creates pending proposals, and "auto" applies captured proposals and runs weekly review of Workshop-owned skills using ordinary file edits. Default: "auto".',
   approvals:

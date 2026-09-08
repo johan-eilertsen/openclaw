@@ -58,6 +58,15 @@ export type SkillsWorkshopAutonomousMode = "off" | "propose" | "auto";
 
 /** Autonomous and approval settings for generated skill proposals. */
 export type SkillsWorkshopConfig = {
+  /** Explicitly owned canonical source. Publishing remains the repository's responsibility. */
+  repository?: {
+    /** Absolute Git checkout path; authored skills are below skills/. */
+    path: string;
+    /** Only this agent may propose and apply repository skill updates. */
+    ownerAgentId: string;
+    /** Operator-approved skill directory names, not consumer or frontmatter claims. */
+    writableSkills: string[];
+  };
   /** Autonomous Skill Workshop behavior controlled separately from user-prompted proposals. */
   autonomous?: {
     /** Capture policy for durable conversation signals and substantial completed work. */

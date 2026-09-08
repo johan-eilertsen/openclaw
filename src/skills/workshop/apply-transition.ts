@@ -21,8 +21,8 @@ import { createSkillProposalEvent, dispatchSkillProposalChanged } from "./plugin
 import { readSkillProposalTargetTreeSha256 } from "./proposal-bundle.js";
 import { hashSkillProposalContent } from "./proposal-hash.js";
 import { scanProposalBundle } from "./proposal-scan.js";
+import { resolveWorkshopTargetRoot } from "./repository.js";
 import { hashSkillProposalRevision } from "./revision-hash.js";
-import { resolveWorkshopSkillsDir } from "./skills-root.js";
 import type { NewSkillProposalEvent } from "./store-sqlite-event.js";
 import { readStoredProposal } from "./store-sqlite-record.js";
 import { clearSkillProposalRollback, writeSkillProposalRollback } from "./store-sqlite-rollback.js";
@@ -213,7 +213,11 @@ export async function applySkillProposalTransition(
       if (!input.agentId) {
         throw new Error("Skill Workshop requires the active agent id.");
       }
-      const skillsRoot = resolveWorkshopSkillsDir(input.config, input.agentId, input.env);
+      const skillsRoot = resolveWorkshopTargetRoot({
+        ...input,
+        agentId: input.agentId,
+        target: record.target,
+      });
       assertInsideSkillsRoot(skillsRoot, record.target.skillFile, "skill file");
       assertInsideSkillsRoot(skillsRoot, record.target.skillDir, "skill directory");
       if (record.evaluation?.id !== evaluated.evaluation.id) {
@@ -258,6 +262,7 @@ export async function applySkillProposalTransition(
       });
 
       try {
+        resolveWorkshopTargetRoot({ ...input, agentId: input.agentId, target: record.target });
         await applyWorkspaceSkillMutation(mutation);
       } catch (error) {
         // A rejected filesystem write may have partially changed its target

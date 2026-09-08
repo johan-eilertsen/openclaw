@@ -25,8 +25,8 @@ import {
 } from "./proposal-generation.js";
 import { hashSkillProposalContent } from "./proposal-hash.js";
 import { reconcileInterruptedSkillProposalApply } from "./reconcile-transition.js";
+import { resolveWorkshopCreateRoot, resolveWorkshopTargetRoot } from "./repository.js";
 import { hashSkillProposalRevision } from "./revision-hash.js";
-import { resolveWorkshopSkillsDir } from "./skills-root.js";
 import {
   assertProposalId,
   MAX_PROPOSAL_SUPPORT_FILES,
@@ -152,17 +152,18 @@ export function resolveSkillProposalTarget(params: {
   skillKey: string;
   skillDir: string;
   skillFile: string;
+  source?: string;
 } {
   const skillKey = normalizeSkillIndexName(params.skillName);
   if (!skillKey) {
     throw new Error("Skill name must contain at least one letter or number.");
   }
-  const skillsRoot = resolveWorkshopSkillsDir(params.config, params.agentId, params.env);
+  const { skillsRoot, source } = resolveWorkshopCreateRoot({ ...params, skillKey });
   const skillDir = path.resolve(skillsRoot, skillKey);
   const skillFile = path.join(skillDir, "SKILL.md");
   assertInsideSkillsRoot(skillsRoot, skillDir, "skill directory");
   assertInsideSkillsRoot(skillsRoot, skillFile, "skill file");
-  return { skillKey, skillDir, skillFile };
+  return { skillKey, skillDir, skillFile, ...(source ? { source } : {}) };
 }
 
 function isStoredProposalVisible(row: SkillProposalRow, scope: SkillProposalLookupScope): boolean {
@@ -491,11 +492,22 @@ async function reconcileInterruptedApply(
   } catch {
     return false;
   }
+  let skillsRoot: string;
+  try {
+    skillsRoot = resolveWorkshopTargetRoot({
+      ...options,
+      agentId: options.agentId,
+      target: stored.record.target,
+    });
+  } catch {
+    // Retain recovery facts and readable history if the operator revoked ownership.
+    return false;
+  }
   return await reconcileInterruptedSkillProposalApply({
     record: stored.record,
     expectedRecordJson: stored.row.record_json,
     draftContent,
-    skillsRoot: resolveWorkshopSkillsDir(options.config, options.agentId, options.env),
+    skillsRoot,
     store: options,
   });
 }

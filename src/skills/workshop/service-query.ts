@@ -10,7 +10,7 @@ import {
 import { transitionPendingSkillProposalToStale } from "./apply-transition.js";
 import { resolveSkillProposalName } from "./frontmatter.js";
 import { dispatchSkillProposalChanged } from "./plugin-hooks.js";
-import { resolveWorkshopSkillsDir } from "./skills-root.js";
+import { resolveWorkshopTargetRoot } from "./repository.js";
 import {
   SkillProposalDraftMissingError,
   readSkillProposal,
@@ -177,7 +177,13 @@ async function reconcilePendingSkillProposal(
   if (record.status !== "pending") {
     return;
   }
-  const workshopDir = resolveWorkshopSkillsDir(options.config, options.agentId, options.env);
+  let workshopDir: string;
+  try {
+    workshopDir = resolveWorkshopTargetRoot({ ...options, target: record.target });
+  } catch {
+    // Keep history readable when ownership has been revoked or a target moved.
+    return;
+  }
   const transition = await withSkillProposalCommitLock(
     record,
     async () => {

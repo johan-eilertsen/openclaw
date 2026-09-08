@@ -483,6 +483,16 @@ export const OpenClawSchemaShape = {
         .optional(),
       workshop: z
         .strictObject({
+          repository: z
+            .strictObject({
+              path: z.string().min(1),
+              ownerAgentId: z.string().min(1),
+              writableSkills: z
+                .array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/))
+                .min(1)
+                .max(256),
+            })
+            .optional(),
           autonomous: z
             .strictObject({
               mode: z.union([z.literal("off"), z.literal("propose"), z.literal("auto")]).optional(),

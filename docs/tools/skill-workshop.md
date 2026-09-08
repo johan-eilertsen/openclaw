@@ -10,9 +10,10 @@ sidebarTitle: "Skill Workshop"
 ---
 
 Skill Workshop is OpenClaw's governed path for creating and updating its own
-generated skills. Through this path, agents and operators create a **proposal** (pending
+generated skills and explicitly authorized repository skills. Through this path, agents and operators create a **proposal** (pending
 draft with content, target binding, scanner state, hashes, and rollback
-metadata) that becomes a live skill only when applied.
+metadata). Apply writes the bound skill source; repository skills require a separate
+validated publication before runtime activation.
 
 Automatic background learning and weekly collection review instead maintain the
 Workshop directory with normal agent file tools. These direct edits do not create
@@ -31,6 +32,65 @@ managed revisions rather than Workshop proposals.
 Workshop storage is installation-managed and separate from the session
 workspace and managed skill library. `OPENCLAW_STATE_DIR` selects the state
 directory; `~/.openclaw` is the default.
+
+## Repository-owned skills
+
+Register an owned canonical Git checkout to create and update its skills through
+Workshop. This is an explicit operator ownership grant, not a discovery setting.
+Only register skills you own and control. Do not register bundled or third-party
+sources, consumer installations, or a directory selected by skill frontmatter.
+
+```json5
+{
+  skills: {
+    workshop: {
+      repository: {
+        path: "/absolute/path/to/owned-skill-repository",
+        ownerAgentId: "main",
+        writableSkills: ["release-review"],
+      },
+    },
+  },
+}
+```
+
+The checkout must contain `.git` and a real `skills` directory. Each permitted
+skill must be at `skills/<name>/SKILL.md`, with the same frontmatter name.
+The repository owner sees these skills in Workshop's inventory and uses the
+same `read`, `update`, `revise`, `evaluate`, and `apply` operations as other
+Workshop skills. Support-file updates keep the existing bundle validation.
+Other agents cannot update these sources or create an agent-local duplicate
+of a reserved name. To create a new repository skill, register its name in
+`writableSkills` first, then use `create` through the owner agent. Apply writes
+it under the canonical `skills` directory; include it in the catalog manifest
+before publication.
+
+Apply and interrupted-apply recovery recheck the current owner, allowlist,
+exact source path, containment, and target hashes. Revoking the grant stops
+pending writes and automatic recovery; proposal history remains readable.
+Existing agent-local proposal records are historical records, not repository
+write authority. Recreate an old proposal against the canonical source rather
+than retargeting stored records or moving skill files.
+
+Repository sources are **not** added to runtime discovery or watch roots.
+After apply, use the repository's existing procedure to update the catalog
+version and manifest hashes, validate the complete catalog, review and commit,
+then publish and verify every consumer against that commit. Workshop does not
+run repository commands, commit, or deploy on an agent's behalf. A manifest
+validation failure is an unpublished source change, not successful activation.
+Keep consumers on the previous verified version until publication succeeds.
+
+For recovery, retry a pending proposal only after resolving its recorded target
+conflict. If ownership was revoked during an interrupted apply, inspect the
+source and rollback facts before restoring the grant. Revert a completed source
+change through a new Workshop proposal, update and commit the manifest, and
+republish. Use the publisher's receipt-bound rollback if a consumer publication
+fails. Legacy collection backups remain confined to their original agent-local
+Workshop root and cannot restore over the repository.
+
+Verify both the publisher receipts and a fresh runtime's actual skill selection.
+Matching files alone do not prove that an existing session has refreshed its
+selected instructions.
 
 ## Personal library authoring
 
@@ -77,11 +137,11 @@ The following lifecycle applies to Workshop proposals:
   `SKILL.md`.
 - **Apply is the only live write:** create, update, and revise never change
   active skills.
-- **Directory-owned updates:** creates and updates stay inside
-  `<state-dir>/agents/<agentId>/agent/workshop-skills`. A skill is Workshop-owned
-  exactly when it is contained in that agent's directory.
+- **Bounded updates:** generated skills stay inside the agent's Workshop
+  directory. Repository updates require the explicit ownership grant above.
 - **No clobber:** create fails if the target already exists in that agent's
-  Workshop directory. Skills from other sources are never changed.
+  Workshop directory. Reserved repository names bind to the canonical source and cannot be duplicated. Other
+  sources remain outside Workshop ownership.
   For same-named skills, [loading order](/tools/skills#loading-order) determines
   which definition is used.
 - **Hash bound:** update proposals bind to the current target hash and go
@@ -463,7 +523,7 @@ separately. When the selected artifact does not fit, the result omits its body,
 reports the original size, and points to smaller per-artifact reads or the
 unbounded operator CLI command shown above.
 
-Agents must use `skill_workshop` for generated skill work and must not create or
+Agents must use `skill_workshop` for generated and registered repository skill work and must not create or
 change skill or proposal files directly during foreground authoring. Automatic
 background maintenance uses the rooted file-tool path described below instead.
 The foreground rule is advisory and prompt-enforced. A hard guard is not
