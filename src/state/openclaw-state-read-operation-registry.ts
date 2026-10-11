@@ -50,6 +50,14 @@ const loaders = {
     import("../sessions/session-upstream-links.kernel.js").then(
       (m) => m.sessionUpstreamReadOperations,
     ),
+  clawMonitorCleanup: () =>
+    import("../claws/monitor-cleanup.read.worker.js").then(
+      (m) => m.clawMonitorCleanupReadOperations,
+    ),
+  automationProactive: () =>
+    import("../cron/proactive-job-receipt.read.worker.js").then(
+      (m) => m.proactiveJobReceiptReadOperations,
+    ),
   diagnostic: () =>
     import("../infra/sqlite-audit-record.kernel.js").then((m) => m.diagnosticReadOperations),
   restartSentinel: () =>

@@ -248,7 +248,6 @@ describe("session mutation authorization store caches", () => {
         agents: {
           ownership: "explicit",
           defaults: {
-            heartbeat: { agentId: "ops" },
             systemAgent: { agentId: "ops" },
             authInheritance: { agentId: "ops" },
           },
@@ -297,7 +296,6 @@ describe("session mutation authorization store caches", () => {
           agents: {
             ownership: "explicit",
             defaults: {
-              heartbeat: { agentId: "ops" },
               systemAgent: { agentId: "ops" },
               authInheritance: { agentId: "ops" },
             },

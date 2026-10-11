@@ -21,6 +21,7 @@ import type { LegacyStateMigrationStepReceipt } from "../infra/state-migrations.
 import { resolvePluginDoctorProviderRenames } from "../plugins/doctor-contract-registry.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { createPluginCapabilityConsentPrompter } from "../wizard/plugin-capability-consent.js";
+import type { AutomaticHeartbeatRepairAdmission } from "./doctor-automatic-heartbeat-repair.js";
 import {
   noteDoctorHookConfigWarnings,
   noteImplicitFallbackClobberWarnings,
@@ -42,7 +43,10 @@ import {
   applyUnknownConfigKeyStep,
   prepareDoctorConfigReferenceSource,
 } from "./doctor/shared/config-flow-steps.js";
-import { prepareDoctorConfigMigrationResult } from "./doctor/shared/config-migration-result.js";
+import {
+  prepareDoctorConfigMigrationResult,
+  retainHeartbeatMigrationInput,
+} from "./doctor/shared/config-migration-result.js";
 import {
   applyDoctorConfigMutation,
   type DoctorConfigMutationResult,
@@ -73,6 +77,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   retiredStateAdmitted?: boolean;
   stateSchemaPreparation?: LegacyStateMigrationStepReceipt;
   agentDatabaseMigrationDiscovery?: PreparedAgentDatabaseMigrationDiscovery;
+  automaticHeartbeatRepair?: AutomaticHeartbeatRepairAdmission;
   confirm: (p: { message: string; initialValue: boolean }) => Promise<boolean>;
   runtime?: RuntimeEnv;
   prompter?: DoctorPrompter;
@@ -94,6 +99,9 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
         repairPrefixedConfig: shouldRepair,
         doctorOnlyStateMigrations: shouldRepair,
         preparePluginMetadataSnapshot: true,
+        ...(params.automaticHeartbeatRepair
+          ? { automaticHeartbeatRepair: params.automaticHeartbeatRepair }
+          : {}),
         ...(params.agentDatabaseMigrationDiscovery
           ? { agentDatabaseMigrationDiscovery: params.agentDatabaseMigrationDiscovery }
           : {}),
@@ -141,7 +149,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   };
   let state: DoctorConfigMutationState = {
     cfg: baseCfg,
-    candidate: structuredClone(baseCfg),
+    candidate: await retainHeartbeatMigrationInput(baseCfg, preflight.heartbeatMigrationSource),
     pendingChanges: false,
     fixHints: [],
   };
@@ -562,6 +570,24 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
     note(sanitizeDoctorNote(mutableAllowlistWarnings.join("\n")), "Doctor warnings");
   }
 
+  const modelBillingRouteConfig = state.candidate;
+  if (shouldRepair) {
+    const { tryProjectRetiredHeartbeatConfig } = await import("./doctor-heartbeat-legacy.js");
+    const { retireHeartbeatWithDoctor } = await import("./doctor-heartbeat-retirement.js");
+    const retiredConfig = tryProjectRetiredHeartbeatConfig(state.candidate)
+      ? await retireHeartbeatWithDoctor(state.candidate)
+      : undefined;
+    if (retiredConfig && JSON.stringify(retiredConfig) !== JSON.stringify(state.candidate)) {
+      applyConfigMutation(
+        {
+          config: retiredConfig,
+          changes: ["Retired heartbeat configuration after ordinary automation data was verified."],
+        },
+        `Run "${doctorFixCommand}" to finish the heartbeat migration.`,
+      );
+    }
+  }
+
   const unknownStep = applyUnknownConfigKeyStep({
     state,
     shouldRepair,
@@ -626,6 +652,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
 
   const migrationResult = await finalizeMigrationResult({
     cfg,
+    modelBillingRouteConfig,
     shouldWriteConfig,
     pluginInventoryChanged: pluginMetadataSnapshotState.inventoryChanged,
     metadataSnapshot: pluginMetadataSnapshotState.current,
