@@ -172,7 +172,9 @@ it("rejects an invalid async load and rolls back its injected config environment
 it.each(["metadata", "handoff"] as const)(
   "refuses snapshot results after its host owner is replaced during %s",
   async (phase) => {
-    const options = fixture(JSON.stringify({ gateway: { mode: "local" } }));
+    const options = fixture(
+      JSON.stringify({ gateway: { mode: "local" }, plugins: { enabled: false } }),
+    );
     const prepared = createDeferredCore();
     const release = createDeferredCore();
     const resolveMetadata = pluginMetadata.resolveConfigWidePluginMetadataSnapshotAsync;
@@ -272,7 +274,7 @@ it.each(["full", "core-only"] as const)(
 );
 
 it("rechecks the cold reader before observation after delayed metadata preparation", async () => {
-  const raw = JSON.stringify({ gateway: { mode: "local" } });
+  const raw = JSON.stringify({ gateway: { mode: "local" }, plugins: { enabled: false } });
   const { io, env, homedir, configPath, logger } = fixture(raw);
   const started = createDeferredCore();
   const release = createDeferredCore();

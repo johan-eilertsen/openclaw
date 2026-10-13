@@ -1,13 +1,29 @@
 import { expectDefined } from "@openclaw/normalization-core";
+import { resolveConfigWidePluginMetadataSnapshotAsync } from "../config/io.plugin-metadata.js";
 import { normalizeSubmittedConfigModelRefs } from "../config/model-input-normalization.js";
 import { normalizeAgentModelRefForConfig } from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { loadPluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
+import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-readonly.js";
 import type { PathSegment } from "./config-cli-path.js";
 
-export function normalizeConfigMutationModelRefs(cfg: OpenClawConfig): OpenClawConfig {
-  const pluginMetadata = loadPluginMetadataSnapshot({ config: cfg, env: process.env });
-  return normalizeSubmittedConfigModelRefs(cfg, pluginMetadata.owners.modelIdNormalizationPolicies);
+export async function normalizeConfigMutationModelRefs(
+  cfg: OpenClawConfig,
+): Promise<OpenClawConfig> {
+  const needsCatalogPolicy = Object.values(cfg.models?.providers ?? {}).some(
+    (provider) =>
+      Array.isArray(provider?.models) &&
+      provider.models.some((model) => typeof model?.id === "string" && model.id.trim()),
+  );
+  if (!needsCatalogPolicy) {
+    return normalizeSubmittedConfigModelRefs(cfg);
+  }
+  return withArtifactPreservingStateReads(async () => {
+    const metadata = await resolveConfigWidePluginMetadataSnapshotAsync({
+      config: cfg,
+      env: process.env,
+    });
+    return normalizeSubmittedConfigModelRefs(cfg, metadata.owners.modelIdNormalizationPolicies);
+  });
 }
 
 export function normalizeConfigMutationExplicitSetPath(path: PathSegment[]): PathSegment[] {

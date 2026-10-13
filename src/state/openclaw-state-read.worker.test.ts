@@ -9,6 +9,7 @@ const mock = vi.hoisted(() => ({
   admit: vi.fn<() => void>(),
   query: vi.fn<() => []>(),
   settle: vi.fn<(operation: (source: { db: object }) => unknown) => unknown>(),
+  unrelatedHandlerLoaded: false,
 }));
 vi.mock("../infra/worker-task-server.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../infra/worker-task-server.js")>()),
@@ -16,9 +17,18 @@ vi.mock("../infra/worker-task-server.js", async (importOriginal) => ({
     mock.handler.mockImplementation(handler);
   },
 }));
-vi.mock("./backup-run-records.kernel.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./backup-run-records.kernel.js")>()),
-  readBackupRunsInDatabase: mock.query,
+vi.mock("./backup-run-records.kernel.js", async (importOriginal) => {
+  mock.unrelatedHandlerLoaded = true;
+  return {
+    ...(await importOriginal<typeof import("./backup-run-records.kernel.js")>()),
+    readBackupRunsInDatabase: mock.query,
+  };
+});
+vi.mock("../plugins/plugin-metadata-state.kernel.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../plugins/plugin-metadata-state.kernel.js")>()),
+  readPluginMetadataStateRowsInDatabase: () => [
+    { state_key: "plugins.bundledDiscovery", value_json: '"allowlist"' },
+  ],
 }));
 vi.mock("./openclaw-agent-db-registry.read.js", () => ({
   readRegisteredAgentDatabaseRows: mock.query,
@@ -55,6 +65,23 @@ beforeEach(() => {
       return { status: "unavailable", error };
     }
   });
+});
+
+it("reads plugin metadata without loading unrelated command handlers", async () => {
+  const reply = await mock.handler({
+    ...request,
+    command: {
+      type: "plugins.metadata.read",
+      input: { stateKeys: ["plugins.bundledDiscovery"] },
+    },
+  });
+  expect(reply).toEqual({
+    ok: true,
+    type: "plugins.metadata.read",
+    sourceAdmitted: true,
+    rows: [{ state_key: "plugins.bundledDiscovery", value_json: '"allowlist"' }],
+  });
+  expect(mock.unrelatedHandlerLoaded).toBe(false);
 });
 
 it.each([

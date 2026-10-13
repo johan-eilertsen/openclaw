@@ -551,7 +551,11 @@ async function readConfigSnapshotWithPluginMetadata(
     allowSuspiciousRecovery: options.allowSuspiciousRecovery,
   });
   let pluginMetadataSnapshot = result.pluginMetadataSnapshot;
-  if (!pluginMetadataSnapshot && result.snapshot.valid) {
+  if (
+    options.completePluginMetadata !== false &&
+    !pluginMetadataSnapshot &&
+    result.snapshot.valid
+  ) {
     const pluginMetadata = context.createValidationPluginMetadataSnapshotLoader({
       env: context.deps.env,
       allowCurrentPluginMetadata: options.allowCurrentPluginMetadata,

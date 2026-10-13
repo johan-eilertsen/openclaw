@@ -131,18 +131,25 @@ export async function runConfigGet(opts: { path: string; json?: boolean; runtime
     const parsedPath = parseConfigSetPath(opts.path);
     const { readConfigFileSnapshotWithPluginMetadata } = await import("../config/config.js");
     const { ensureValidConfigSnapshotForCli } = await import("./config-cli-validation.js");
-    const read = await readConfigFileSnapshotWithPluginMetadata({ observe: false });
+    // Plugin schemas and secret hints only extend these namespaces.
+    const needsPluginSchema = parsedPath[0] === "plugins" || parsedPath[0] === "channels";
+    const read = await readConfigFileSnapshotWithPluginMetadata({
+      observe: false,
+      completePluginMetadata: needsPluginSchema,
+    });
     const { snapshot, pluginMetadataSnapshot } = read;
     ensureValidConfigSnapshotForCli(snapshot, runtime, { json: opts.json });
-    if (!pluginMetadataSnapshot) {
+    if (needsPluginSchema && !pluginMetadataSnapshot) {
       throw new Error("Config plugin metadata unavailable; refusing to display config values.");
     }
-    const { buildRuntimeConfigSchemaFromRegistry } = await import("../config/runtime-schema.js");
     const { redactConfigObject } = await import("../config/redact-snapshot.js");
-    const { schema, uiHints } = buildRuntimeConfigSchemaFromRegistry(
-      pluginMetadataSnapshot.manifestRegistry,
-      snapshot.sourceConfig,
-    );
+    const { schema, uiHints } =
+      needsPluginSchema && pluginMetadataSnapshot
+        ? (await import("../config/runtime-schema.js")).buildRuntimeConfigSchemaFromRegistry(
+            pluginMetadataSnapshot.manifestRegistry,
+            snapshot.sourceConfig,
+          )
+        : (await import("../config/schema.js")).buildConfigSchemaCore();
     const res = getAtPath(redactConfigObject(snapshot.config, uiHints), parsedPath);
     if (!res.found || res.value === undefined) {
       const autoManaged = AUTO_MANAGED_CONFIG_META_PATHS.some(
@@ -251,6 +258,7 @@ async function runConfigValidate(opts: { json?: boolean; runtime?: RuntimeEnv } 
     const read = await readConfigFileSnapshotWithPluginMetadata({
       observe: false,
       prepareValidation: "strict",
+      completePluginMetadata: false,
     });
     const snapshot = await finishConfigValidationForCli(read);
     outputPath = snapshot.path;

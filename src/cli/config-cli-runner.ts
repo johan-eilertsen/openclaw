@@ -284,7 +284,7 @@ export async function runConfigOperations(params: {
   }
   // Mutate resolved config so runtime defaults never leak into the authored file.
   const next = structuredClone(snapshot.resolved) as Record<string, unknown>;
-  const currentConfig = normalizeConfigMutationModelRefs(snapshot.resolved);
+  const currentConfig = await normalizeConfigMutationModelRefs(snapshot.resolved);
   let mutationSchema: Promise<ConfigSchemaResponse | undefined> | undefined;
   const getMutationSchema = () =>
     (mutationSchema ??= import("../config/runtime-schema.js")
@@ -456,7 +456,7 @@ export async function runConfigOperations(params: {
     }
     nextConfig = coerceConfig(restored.result);
   }
-  nextConfig = normalizeConfigMutationModelRefs(nextConfig);
+  nextConfig = await normalizeConfigMutationModelRefs(nextConfig);
   const normalizedExplicitSetPaths = explicitSetPaths.map(normalizeConfigMutationExplicitSetPath);
   // Parent merge paths own policy, but inherited children are not caller-authored values.
   const resolutionEnv = mutationStart.writeOptions.envSnapshotForRestore ?? process.env;
