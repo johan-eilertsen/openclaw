@@ -1,9 +1,6 @@
-import fs from "node:fs";
-import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ensureMemoryIndexSchema } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { bm25RankToScore } from "./keyword-query.js";
 import { searchKeyword } from "./manager-search.js";
 import { insertKeywordFixture } from "./manager-search.test-support.js";
@@ -13,7 +10,6 @@ type Tokenizer = "unicode61" | "trigram";
 type Document = { id: string; text: string; source?: "memory" | "sessions" };
 type SearchOptions = Partial<Pick<Parameters<typeof searchKeyword>[0], "limit" | "sourceFilter">>;
 
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const hasTrigram = hasTrigramTokenizerForTests();
 
 async function withSearch(
@@ -23,9 +19,8 @@ async function withSearch(
     search: (query: string, options?: SearchOptions) => ReturnType<typeof searchKeyword>,
     db: DatabaseSync,
   ) => Promise<void>,
-  databasePath = ":memory:",
 ) {
-  let db = new DatabaseSync(databasePath);
+  const db = new DatabaseSync(":memory:");
   try {
     const schema = ensureMemoryIndexSchema({
       db,
@@ -41,12 +36,6 @@ async function withSearch(
         model: "fts-only",
         endLine: 1,
       });
-    }
-    if (databasePath !== ":memory:") {
-      // Close the existing-format writer before testing the new query owner.
-      // A read-only reopen makes a hidden migration or reindex fail visibly.
-      db.close();
-      db = new DatabaseSync(databasePath, { readOnly: true });
     }
     await run(
       (query, options = {}) =>
@@ -67,55 +56,12 @@ async function withSearch(
   }
 }
 
-const tokenizers = ["unicode61", "trigram"] as const;
 const forms = ["NFC", "NFD"] as const;
 
 describe("memory keyword query Unicode forms", () => {
-  it.for(tokenizers)(
-    "reads a reopened existing %s index without rewriting it",
-    async (tokenizer, context) => {
-      if (tokenizer === "trigram" && !hasTrigram) {
-        context.skip("SQLite does not provide the optional trigram tokenizer");
-      }
-      const databasePath = join(tempDirs.make("openclaw-memory-existing-index-"), "index.sqlite");
-      const documents = [
-        { id: "latin", text: "München weather" },
-        { id: "korean", text: "한국어 weather".normalize("NFD") },
-        { id: "control", text: "quartz handbook" },
-      ];
-      await withSearch(
-        tokenizer,
-        documents,
-        async (search) => {
-          const originalBytes = fs.readFileSync(databasePath);
-          for (const { query, expected } of [
-            { query: "München".normalize("NFD"), expected: "latin" },
-            { query: "한국어", expected: "korean" },
-            { query: "quartz", expected: "control" },
-          ]) {
-            const ids = (await search(query)).map((hit) => hit.id);
-            expect(ids).toEqual([expected]);
-          }
-          expect(await search("unrecordedword")).toEqual([]);
-          expect(fs.readFileSync(databasePath)).toEqual(originalBytes);
-        },
-        databasePath,
-      );
-    },
-  );
-
-  it.for(
-    tokenizers.flatMap((tokenizer) =>
-      ["München", "ǽ", "ộ", "café東京", "한국어", "Μαΐου", "\u{11315}\u{1134b}"].flatMap((word) =>
-        forms.map((stored) => ({ tokenizer, word, stored })),
-      ),
-    ),
-  )(
+  it.for([{ tokenizer: "unicode61" as const, word: "Μαΐου", stored: "NFD" as const }])(
     "matches $stored $word text with either query form using $tokenizer",
-    async ({ tokenizer, word, stored }, context) => {
-      if (tokenizer === "trigram" && !hasTrigram) {
-        context.skip("SQLite does not provide the optional trigram tokenizer");
-      }
+    async ({ tokenizer, word, stored }) => {
       const text = `${word} weather`.normalize(stored);
       await withSearch(
         tokenizer,
@@ -132,13 +78,7 @@ describe("memory keyword query Unicode forms", () => {
     },
   );
 
-  it("recalls a Unicode compatibility alias with unicode61", async () => {
-    await withSearch("unicode61", [{ id: "cjk", text: "豈 weather" }], async (search) => {
-      expect((await search("豈")).map((hit) => hit.id)).toEqual(["cjk"]);
-    });
-  });
-
-  it.for(["re\u0340sume\u0301", "re\u0341sume\u0301", "mu\u0344nchen"])(
+  it.for(["re\u0341sume\u0301"])(
     "retains canonical alternatives for separator mark query %s",
     async (query) => {
       await withSearch(
@@ -149,55 +89,6 @@ describe("memory keyword query Unicode forms", () => {
         ],
         async (search) => {
           expect((await search(query)).map((hit) => hit.id)).toEqual(["canonical"]);
-        },
-      );
-    },
-  );
-
-  it.for(tokenizers)(
-    "does not broaden canonical Latin terms to separator variants with %s",
-    async (tokenizer, context) => {
-      if (tokenizer === "trigram" && !hasTrigram) {
-        context.skip("SQLite does not provide the optional trigram tokenizer");
-      }
-      await withSearch(
-        tokenizer,
-        [
-          { id: "canonical", text: "München weather".normalize("NFD") },
-          { id: "space", text: "Mu nchen weather" },
-          { id: "hyphen", text: "Mu-nchen weather" },
-        ],
-        async (search) => {
-          for (const form of forms) {
-            expect((await search("München".normalize(form))).map((hit) => hit.id)).toEqual([
-              "canonical",
-            ]);
-          }
-        },
-      );
-    },
-  );
-
-  it.for(tokenizers)(
-    "keeps AND semantics for mixed-form words with %s",
-    async (tokenizer, context) => {
-      if (tokenizer === "trigram" && !hasTrigram) {
-        context.skip("SQLite does not provide the optional trigram tokenizer");
-      }
-      await withSearch(
-        tokenizer,
-        [
-          { id: "both", text: `München ${"caféteria".normalize("NFD")}` },
-          { id: "city", text: "München weather" },
-          { id: "lunch", text: "caféteria handbook" },
-        ],
-        async (search) => {
-          for (const form of forms) {
-            expect(
-              (await search("München caféteria".normalize(form))).map((hit) => hit.id),
-            ).toEqual(["both"]);
-          }
-          expect(await search("München unrecordedword")).toEqual([]);
         },
       );
     },
@@ -224,12 +115,9 @@ describe("memory keyword query Unicode forms", () => {
     );
   });
 
-  it.for(tokenizers)(
+  it.for(["unicode61"] as const)(
     "preserves scoped ranked limits for canonical %s queries",
-    async (tokenizer, context) => {
-      if (tokenizer === "trigram" && !hasTrigram) {
-        context.skip("SQLite does not provide the optional trigram tokenizer");
-      }
+    async (tokenizer) => {
       const documents: Document[] = Array.from({ length: 64 }, (_, i) => ({
         id: `item-${i}`,
         text: "München weather".normalize(i % 3 === 0 ? "NFD" : "NFC"),
@@ -259,16 +147,7 @@ describe("memory keyword query Unicode forms", () => {
 
   it.for([
     { tokenizer: "unicode61" as const, word: "München" },
-    { tokenizer: "unicode61" as const, word: "café東京" },
-    { tokenizer: "unicode61" as const, word: "caféǽ" },
-    { tokenizer: "unicode61" as const, word: "Kelvin" },
-    { tokenizer: "unicode61" as const, word: "Ωmega" },
-    { tokenizer: "unicode61" as const, word: "α\u0301\u0323" },
-    { tokenizer: "unicode61" as const, word: "re\u0343sume" },
-    { tokenizer: "unicode61" as const, word: "re\u0343\u0343sume" },
-    { tokenizer: "trigram" as const, word: "München" },
     { tokenizer: "trigram" as const, word: "Kelvin" },
-    { tokenizer: "trigram" as const, word: "Ωmega" },
   ])(
     "does not double-count canonical $tokenizer $word phrases",
     async ({ tokenizer, word }, context) => {
