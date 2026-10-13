@@ -202,6 +202,9 @@ describe("tsdown config", () => {
       entryKeys(config).includes("package-update-activation-recovery"),
     );
     const executableGraphs = new Set([
+      ...configs.filter((config) =>
+        entryKeys(config).includes("worker/gateway-state-owner-heartbeat.worker"),
+      ),
       unifiedGraph,
       expectDefined(workerGraph, "deploy worker graph"),
       requireStandaloneRuntimeGraph("worker/code-mode-node.worker"),

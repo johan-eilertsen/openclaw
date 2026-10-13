@@ -944,7 +944,11 @@ const configs: UserConfig[] = [
           alwaysBundle: (id) =>
             shouldAlwaysBundleDependency(id) ||
             shouldBundleRuntimeSqliteDependency(id) ||
-            (bundleFsSafe && isFsSafe(id)),
+            (bundleFsSafe &&
+              (isFsSafe(id) ||
+                ["semver", "tslog"].some(
+                  (packageName) => id === packageName || id.startsWith(`${packageName}/`),
+                ))),
         },
         outputOptions: getStandaloneRuntimeProcessOutputOptions(name),
         plugins: [

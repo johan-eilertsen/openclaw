@@ -33,7 +33,8 @@ vi.mock("../plugins/plugin-metadata-state.kernel.js", async (importOriginal) => 
 vi.mock("./openclaw-agent-db-registry.read.js", () => ({
   readRegisteredAgentDatabaseRows: mock.query,
 }));
-vi.mock("../infra/gateway-owner-lease.worker.js", () => ({
+vi.mock("../infra/gateway-owner-lease.worker.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../infra/gateway-owner-lease.worker.js")>()),
   inspectGatewayOwnerLease: (_source: unknown, onAdmitted: () => void) => {
     onAdmitted();
     return undefined;

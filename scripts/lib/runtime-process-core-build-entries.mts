@@ -61,8 +61,7 @@ export function getStandaloneRuntimeProcessOutputOptions(name: string) {
 }
 
 export function shouldBundleRuntimeSqliteDependency(id: string): boolean {
-  // Cold readers should not resolve the query, version and logging packages' module trees.
-  return ["kysely", "semver", "tslog"].some((name) => id === name || id.startsWith(`${name}/`));
+  return id === "kysely" || id.startsWith("kysely/");
 }
 
 export function sharedRuntimeProcessBuildEntries(entries: Record<string, string>) {
