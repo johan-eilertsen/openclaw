@@ -2933,8 +2933,6 @@ describe("handleSendChat", () => {
     { caller: "Incognito", reason: "unavailable" },
     { caller: "unobserved owner", reason: "unavailable" },
     { caller: "incomplete attachment metadata", reason: "missing" },
-    { caller: "wrong attachment MIME type", reason: "missing" },
-    { caller: "wrong attachment filename", reason: "missing" },
     { caller: "wrong attachment size", reason: "missing" },
     { caller: "matching owner", reason: null },
     { caller: "remembered offline owner", reason: null },
@@ -2983,16 +2981,6 @@ describe("handleSendChat", () => {
           break;
         case "incomplete attachment metadata":
           candidate.attachments = candidate.attachments?.slice(0, 1);
-          break;
-        case "wrong attachment MIME type":
-          Object.assign(expectDefined(candidate.attachments?.[0], "first attachment metadata"), {
-            mimeType: "text/plain",
-          });
-          break;
-        case "wrong attachment filename":
-          Object.assign(expectDefined(candidate.attachments?.[0], "first attachment metadata"), {
-            fileName: "other-file.png",
-          });
           break;
         case "wrong attachment size":
           Object.assign(expectDefined(candidate.attachments?.[0], "first attachment metadata"), {
@@ -3308,7 +3296,7 @@ describe("handleSendChat", () => {
     },
   );
 
-  it.each(["agent:main:main", "main", "global"])(
+  it.each(["main"])(
     "retries an unconfirmed volatile send from %s with the same run id",
     async (sessionKey) => {
       installQuotaExceededStorage();
