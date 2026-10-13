@@ -214,7 +214,7 @@ describe("parent-local inference context", () => {
         { role: "developer", content: "parent environment" },
         { role: "user", content: "parent question" },
       ];
-      context.prepare({ ...request("root", parent.generation), input });
+      const expected = context.prepare({ ...request("root", parent.generation), input }).body;
       parent.release();
       const fork = context.fork({
         sourceThreadId: "root",
@@ -234,10 +234,50 @@ describe("parent-local inference context", () => {
       try {
         const prepared = context.prepare({
           ...request("fork", fork.generation),
+          instructions: "rebuilt base",
           input: [...rebuilt, ...tail],
         }).body;
         expect(prepared.input).toEqual([...rebuilt, ...tail]);
+        expect(prepared.instructions).toBe(expected.instructions);
         expect(prepared.tool_choice).toBe("none");
+      } finally {
+        context.close();
+      }
+    },
+  );
+
+  it.each([undefined, ""])(
+    "preserves recorded instructions=%j when native history is rebuilt",
+    (instructions) => {
+      const { context, register } = fixture();
+      const parent = register("");
+      const source = request("root", parent.generation);
+      delete source.instructions;
+      if (instructions !== undefined) {
+        source.instructions = instructions;
+      }
+      context.prepare(source);
+      parent.release();
+      const fork = context.fork({
+        sourceThreadId: "root",
+        threadId: "fork",
+        signal: new AbortController().signal,
+        assertCurrent: () => {},
+      });
+      const input = [
+        { role: "developer", content: "rebuilt environment" },
+        { role: "assistant", content: "completed parent answer" },
+        { role: "user", content: "side question" },
+      ];
+      try {
+        const prepared = context.prepare({
+          ...request("fork", fork.generation),
+          instructions: "rebuilt base",
+          input,
+        }).body;
+        expect(prepared.input).toEqual(input);
+        expect(prepared.instructions).toBe(instructions);
+        expect(Object.hasOwn(prepared, "instructions")).toBe(instructions !== undefined);
       } finally {
         context.close();
       }
@@ -318,7 +358,7 @@ describe("parent-local inference context", () => {
       try {
         expect(context.prepare(rebuilt).body).toEqual({
           ...rebuilt,
-          instructions: "rebuilt base\n\nprivate",
+          instructions: "native base\n\nprivate",
           tool_choice: "none",
         });
       } finally {

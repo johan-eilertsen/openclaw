@@ -265,13 +265,17 @@ export function createCodexInferenceContext(assertClientCurrent: () => void) {
           }
           preparedBody.input = [...prefix.input, ...input.slice(prefix.input.length)];
         } else if (prefix) {
-          // Native history remains authoritative after a WS delta; restore only
-          // declarations changed by disabling hosted search in the native fork.
+          // Native history owns the tail; the retained request still owns prepared
+          // instructions and declarations, independently of input-prefix equality.
           preparedBody = {
             ...preparedBody,
             ...(prefix.tools !== undefined ? { tools: prefix.tools } : {}),
             ...(input ? { input } : {}),
           };
+          delete preparedBody.instructions;
+          if (prefix.instructions !== undefined) {
+            preparedBody.instructions = prefix.instructions;
+          }
         }
         if (registration.denyToolCalls) {
           preparedBody = { ...preparedBody, tool_choice: "none" };

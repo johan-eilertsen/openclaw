@@ -99,8 +99,8 @@ and WebSocket continuation requests fall back to native thread reconstruction
 without guaranteed cache reuse. Native reconstructed history also takes precedence when
 its prefix no longer matches the recorded request. Completed parent responses and
 subsequent fork tool-denial outcomes remain before the side question or continuation.
-While declarations remain in the snapshot budget,
-tool schemas stay parent-identical even on that native reconstruction path.
+While the prepared request remains in the snapshot budget,
+instructions and tool schemas stay parent-identical even on that native reconstruction path.
 Denied forks always set tool choice to `none` on managed inference requests,
 while native hosted search remains disabled. The fork has its own thread,
 session, and current model authority.
