@@ -365,7 +365,7 @@ function withFreshOpenClawStateDatabaseReadOnly<T>(
   const prepared = requiresArtifactPreservingSnapshot(pathname)
     ? prepareSqliteReadOnlyLocationSync(pathname)
     : undefined;
-  // Worker discovery passes share the native reader's admission and idle lifetime.
+  // Maintenance must release readers before replacing store files.
   return withOpenClawStateReadOnlyLocation(
     operation,
     pathname,
@@ -373,7 +373,7 @@ function withFreshOpenClawStateDatabaseReadOnly<T>(
     undefined,
     undefined,
     undefined,
-    !isMainThread,
+    !isMainThread && !getOpenClawDatabaseMaintenanceScope(),
   );
 }
 

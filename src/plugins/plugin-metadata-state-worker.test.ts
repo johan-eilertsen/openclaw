@@ -127,7 +127,8 @@ it("reuses the synchronous discovery reader and sees in-process writes between p
     import { closeRetainedOpenClawStateReadConnections } from ${JSON.stringify(moduleUrl("../state/openclaw-state-db-read-connection.ts"))};
     import { readPluginMetadataStateRowsSync } from ${JSON.stringify(moduleUrl("./installed-plugin-index-row.ts"))};
     const pathname = workerData.databasePath;
-    const read = () => readPluginMetadataStateRowsSync(["plugins.bundledDiscovery"], { path: pathname });
+    const read = () => readPluginMetadataStateRowsSync(["plugins.bundledDiscovery"], { path: pathname })
+      .map((row) => ({ ...row }));
     const connection = () => {
       const readers = readSqliteReaderDiagnosticsForPath(pathname).connections;
       assert.equal(readers.length, 1);
