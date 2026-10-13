@@ -263,7 +263,7 @@ it("preserves database-family bytes during ambient artifact-preserving async ins
         )?.diagnostics,
       ).toEqual([{ level: "warn", message: "synthetic index" }]);
     });
-  await withArtifactPreservingStateReads(inspect);
+  await withoutMainThreadSql(() => withArtifactPreservingStateReads(inspect));
   await closeOpenClawStateDatabaseAsync();
   expect(familyHashes(databasePath)).toEqual(before);
 });

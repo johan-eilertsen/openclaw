@@ -8,7 +8,10 @@ import type {
   AsyncPreparedSqliteReadOnlyLocation,
   RetainedSqliteSnapshotPreparation,
 } from "../infra/sqlite-readonly-location.types.js";
-import { startSqliteReadOnlyLocationAsync } from "../infra/sqlite-snapshot-source.js";
+import {
+  prepareSqliteReadOnlyLocationAwaited,
+  startSqliteReadOnlyLocationAsync,
+} from "../infra/sqlite-snapshot-source.js";
 import {
   assertExistingDatabaseIdentity,
   type DatabaseFileIdentity,
@@ -51,6 +54,7 @@ type Selection = {
   context: ReturnType<typeof captureOpenClawStateReadWorkerContext>;
   preserveArtifacts: boolean;
   preferIndependentWarmRead?: true;
+  snapshotPreparation?: "awaited";
   onChunk?: OpenClawStateReadOptions["onChunk"];
   onChunkAsync?: OpenClawStateReadOptions["onChunkAsync"];
   controller: AbortController;
@@ -503,10 +507,25 @@ export function startOpenClawStateReadOperation(
           finishProducer,
         );
       } else if (!snapshot && preserveArtifacts && !independentWarmSource) {
-        expectedSourceIdentity = { key: context.admission.identity.key };
+        const sourceIdentity = { key: context.admission.identity.key };
+        expectedSourceIdentity = sourceIdentity;
         authority.assertCurrent();
         waitRetained("producer", transport.startValidateFresh(context, authority), () => {
           authority.assertCurrent();
+          if (selection.snapshotPreparation === "awaited") {
+            waitAwaited(
+              prepareSqliteReadOnlyLocationAwaited(pathname, {
+                signal: authority.signal,
+                expectedSourceIdentity: sourceIdentity,
+              }),
+              (location) => {
+                prepared = location;
+                query();
+              },
+              finishProducer,
+            );
+            return;
+          }
           preparation = startSqliteReadOnlyLocationAsync(pathname, {
             preserveSourceArtifacts: preserveArtifacts,
             signal: authority.signal,
@@ -518,6 +537,7 @@ export function startOpenClawStateReadOperation(
             query();
           });
         });
+        awaitedOnly ||= selection.snapshotPreparation === "awaited";
       } else {
         query();
       }
