@@ -205,6 +205,45 @@ describe("parent-local inference context", () => {
     context.close();
   });
 
+  it.each([false, true])(
+    "keeps the complete native suffix when reconstructed prefix changes=%s",
+    (changed) => {
+      const { context, register } = fixture();
+      const parent = register("private");
+      const input = [
+        { role: "developer", content: "parent environment" },
+        { role: "user", content: "parent question" },
+      ];
+      context.prepare({ ...request("root", parent.generation), input });
+      parent.release();
+      const fork = context.fork({
+        sourceThreadId: "root",
+        threadId: "fork",
+        signal: new AbortController().signal,
+        assertCurrent: () => {},
+      });
+      const tail: JsonObject[] = [
+        { role: "assistant", content: "Parent final answer 4837" },
+        { role: "user", content: "Review that answer" },
+        { type: "function_call", call_id: "denied", name: "read", arguments: "{}" },
+        { type: "function_call_output", call_id: "denied", output: "Tool execution denied" },
+      ];
+      const rebuilt = changed
+        ? [{ role: "developer", content: "rebuilt environment" }, ...input.slice(1)]
+        : input;
+      try {
+        const prepared = context.prepare({
+          ...request("fork", fork.generation),
+          input: [...rebuilt, ...tail],
+        }).body;
+        expect(prepared.input).toEqual([...rebuilt, ...tail]);
+        expect(prepared.tool_choice).toBe("none");
+      } finally {
+        context.close();
+      }
+    },
+  );
+
   it("preserves parent tool declarations but uses native history after a WebSocket continuation", () => {
     const { context, register } = fixture();
     const parent = register("private");
@@ -329,13 +368,16 @@ describe("parent-local inference context", () => {
         const rebuilt = {
           ...request("fork", child.generation),
           instructions: "rebuilt",
-          input: [{ role: "user", content: "side question" }],
+          input: [
+            { role: "user", content: payload },
+            { role: "user", content: "side question" },
+          ],
         };
         const prepared = contextAt(index).prepare(rebuilt).body;
         expect(prepared.instructions).toBe(
           index === 1 ? "rebuilt\n\nprivate" : "native base\n\nprivate",
         );
-        expect(prepared.input).toHaveLength(index === 1 ? 1 : 2);
+        expect(prepared.input).toHaveLength(2);
         child.release();
       }
     } finally {

@@ -16,7 +16,11 @@ import { createDeferredCore } from "../../shared/deferred.js";
 import { attachModelProviderRequestTransport } from "../provider-request-config.js";
 import { closeProviderTransportDispatcherPool } from "../provider-transport-dispatcher-pool.js";
 import type { StreamFn } from "../runtime/index.js";
-import { runEmbeddedSessionFork, wrapStreamFnWithSessionFork } from "./session-fork.js";
+import {
+  recordEmbeddedSessionForkMessage,
+  runEmbeddedSessionFork,
+  wrapStreamFnWithSessionFork,
+} from "./session-fork.js";
 
 const context: Context = {
   systemPrompt: "Stable instructions",
@@ -34,7 +38,7 @@ const model: Model = {
   maxTokens: 1000,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 };
-const identity = { agentId: "main", sessionId: "fork-test" };
+const identity = { agentId: "main", sessionId: "fork-test", runId: "fork-parent" };
 
 function transport(payloads: Record<string, unknown>[], tools: unknown[]): StreamFn {
   return async (requestModel, requestContext, options) => {
@@ -378,6 +382,34 @@ describe("prepared session fork provider boundary", () => {
         assertCurrent: () => {},
       }),
     ).rejects.toThrow("Session forks do not support provider API bedrock-converse-stream");
+  });
+
+  it("does not restore cleared context when an old publication arrives", async () => {
+    const payloads: Record<string, unknown>[] = [];
+    const parent = wrapStreamFnWithSessionFork(transport(payloads, []), identity);
+    const message = await (await parent(model, context, {})).result();
+    cleanupSessionResources(identity.sessionId);
+    recordEmbeddedSessionForkMessage(identity.sessionId, identity.runId, message);
+    await expect(fork()).rejects.toThrow("requires a parent turn");
+    expect(payloads).toHaveLength(1);
+  });
+
+  it("retires optional replay if a published message cannot be retained", async () => {
+    const payloads: Record<string, unknown>[] = [];
+    const parent = wrapStreamFnWithSessionFork(transport(payloads, []), identity);
+    await (await parent(model, context, {})).result();
+    expect(() =>
+      recordEmbeddedSessionForkMessage(identity.sessionId, identity.runId, {
+        role: "toolResult",
+        toolCallId: "lookup",
+        toolName: "lookup",
+        content: [],
+        isError: false,
+        timestamp: 2,
+        details: { callback: () => {} },
+      }),
+    ).not.toThrow();
+    await expect(fork()).rejects.toThrow("requires a parent turn");
   });
 
   it("does not re-enter the parent's one-shot prepared payload hook", async () => {

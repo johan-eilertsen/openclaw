@@ -26,7 +26,10 @@ only the last answer, and the main session's usage and context snapshot stay unc
 
 Read-only session forks reuse the parent's prepared thread and turn settings.
 On managed inference routes, they replay the last model request's exact
-instructions, tool schemas, and input prefix, followed by the side question.
+instructions, tool schemas, and input prefix, followed by the completed parent
+response and the side question. Further fork continuations retain their tool-denial
+outcomes. If the reconstructed history no longer matches the recorded prefix,
+native history takes precedence without guaranteed prompt-cache reuse.
 These request snapshots stay in process memory after parent settlement, within
 a shared 32 MiB least-recently-used budget. An evicted or oversized snapshot,
 or a WebSocket continuation that references prior server-side context, falls
