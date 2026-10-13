@@ -37,21 +37,29 @@ export type StartupConfigPreflightResult = ReturnType<typeof result> & {
 export async function runStartupConfigPreflight(
   options: StartupConfigPreflightOptions,
 ): Promise<StartupConfigPreflightResult> {
-  await using snapshots = createConfigPreflightSnapshotReader();
-  const { withSqliteReadOnlyWorkerScope } = await import("../infra/sqlite-readonly-worker.js");
-  try {
-    const prepared = await withSqliteReadOnlyWorkerScope(() =>
-      prepareStartupConfig(options, snapshots),
-    );
-    return {
-      ...prepared,
-      pluginCache: await snapshots.takePluginCache(prepared.pluginMetadataSnapshot),
-    };
-  } catch (error) {
-    if (options.gateway) {
-      rethrowStartupConfigFailure(error);
+  for (;;) {
+    await using snapshots = createConfigPreflightSnapshotReader();
+    const { withSqliteReadOnlyWorkerScope } = await import("../infra/sqlite-readonly-worker.js");
+    try {
+      const prepared = await withSqliteReadOnlyWorkerScope(() =>
+        prepareStartupConfig(options, snapshots),
+      );
+      return {
+        ...prepared,
+        pluginCache: await snapshots.takePluginCache(prepared.pluginMetadataSnapshot),
+      };
+    } catch (error) {
+      const { StartupMigrationLeaseLostError } =
+        await import("../infra/startup-migration-checkpoint.js");
+      if (error instanceof StartupMigrationLeaseLostError) {
+        recordStartupMigrationWarnings(["Startup migration lease lost; reacquiring and retrying."]);
+        continue;
+      }
+      if (options.gateway) {
+        rethrowStartupConfigFailure(error);
+      }
+      throw error;
     }
-    throw error;
   }
 }
 
