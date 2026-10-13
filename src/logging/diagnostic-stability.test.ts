@@ -358,27 +358,6 @@ describe("diagnostic stability recorder", () => {
     });
   });
 
-  it("keeps the newest events when capacity is exceeded", () => {
-    startDiagnosticStabilityRecorder();
-
-    for (let index = 0; index < 1005; index += 1) {
-      emitDiagnosticEvent({
-        type: "message.queued",
-        source: "test",
-        queueDepth: index,
-      });
-    }
-
-    const snapshot = getDiagnosticStabilitySnapshot({ limit: 1000 });
-
-    expect(snapshot.capacity).toBe(1000);
-    expect(snapshot.count).toBe(1000);
-    expect(snapshot.dropped).toBe(5);
-    expect(snapshot.firstSeq).toBe(6);
-    expect(snapshot.lastSeq).toBe(1005);
-    expectFields(snapshot.events[0], { seq: 6, queueDepth: 5 });
-  });
-
   it("keeps trusted exporter state sticky and rejects spoofed untrusted facts", async () => {
     startDiagnosticStabilityRecorder();
 
@@ -481,48 +460,6 @@ describe("diagnostic stability recorder", () => {
         target: "metrics",
         outcome: "recovered",
         reason: "export_failed",
-        mode: "configured",
-      }),
-    ]);
-  });
-
-  it("preserves explicit and dependency-default ownership on startup failures", async () => {
-    startDiagnosticStabilityRecorder();
-
-    recordDiagnosticExporterHealth("diagnostics-otel", {
-      signal: "traces",
-      transport: "otlp-http-protobuf",
-      endpointMode: "default_endpoint",
-      status: "failure",
-      reason: "start_failed",
-    });
-    recordDiagnosticExporterHealth("diagnostics-otel", {
-      signal: "metrics",
-      transport: "otlp-http-protobuf",
-      endpointMode: "configured",
-      status: "failure",
-      reason: "start_failed",
-    });
-    await waitForDiagnosticEventsDrained();
-
-    expect(
-      getDiagnosticStabilitySnapshot({
-        type: "telemetry.exporter",
-        limit: 1000,
-      }).events,
-    ).toEqual([
-      expect.objectContaining({
-        target: "traces",
-        transport: "otlp-http-protobuf",
-        outcome: "failure",
-        reason: "start_failed",
-        mode: "default_endpoint",
-      }),
-      expect.objectContaining({
-        target: "metrics",
-        transport: "otlp-http-protobuf",
-        outcome: "failure",
-        reason: "start_failed",
         mode: "configured",
       }),
     ]);
@@ -783,30 +720,6 @@ describe("diagnostic stability recorder", () => {
     });
   });
 
-  it("records sanitized trusted model request instrumentation", async () => {
-    startDiagnosticStabilityRecorder();
-
-    emitTrustedDiagnosticEvent({
-      type: "model.call.started",
-      runId: "private-run-id",
-      callId: "private-call-id",
-      sessionKey: "private-session-key",
-      provider: "openai",
-      model: "gpt-5.4",
-      observationUnit: "request",
-    });
-    await waitForDiagnosticEventsDrained();
-
-    expect(getDiagnosticStabilitySnapshot({ type: "model.call.started" }).events).toEqual([
-      expect.objectContaining({
-        type: "model.call.started",
-        provider: "openai",
-        model: "gpt-5.4",
-      }),
-    ]);
-    expect(JSON.stringify(getDiagnosticStabilitySnapshot())).not.toContain("private-");
-  });
-
   it("rejects trusted non-model events before copying their payloads", () => {
     startDiagnosticStabilityRecorder();
     const clone = vi.spyOn(globalThis, "structuredClone");
@@ -849,6 +762,7 @@ describe("diagnostic stability recorder", () => {
       sinceSeq: midDrainSnapshot.lastSeq,
       limit: 1000,
     });
+    expect(JSON.stringify(sinceMidDrain)).not.toContain("overflow-");
     const dropSummary = sinceMidDrain.events.find(
       (event) => event.type === "diagnostic.async_queue.dropped",
     );

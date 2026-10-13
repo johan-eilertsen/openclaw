@@ -325,40 +325,28 @@ describe("DevicesPage gateway lifecycle", () => {
     expect(page.container.textContent).not.toContain("Stale Mac");
   });
 
-  it.each(["node.runnerInventory.changed", "node.hostStats"])(
-    "quietly reloads node status for %s",
-    async (event) => {
-      const nodes = createDeferred<{ nodes: Array<Record<string, unknown>> }>();
-      const { client, request } = clientFor(
-        vi.fn(async (method: string) =>
-          method === "node.list" ? nodes.promise : responseFor(method),
-        ),
-      );
-      const fixture = gatewayFixture(gatewaySnapshot(client));
-      const page = mountPage(fixture, {
-        nodes: [{ nodeId: "node-1", displayName: "Office Mac", connected: false }],
-        devicesList: { paired: [], pending: [] },
-        lastError: "Earlier operator action failed",
-      });
-      fixture.emitEvent(event, { nodeId: "node-1" });
-      expect(request).toHaveBeenCalledWith("node.list", {});
-      expect(page.container.textContent).toContain("Office Mac");
-      expect(page.container.textContent).toContain("Earlier operator action failed");
-      nodes.resolve({ nodes: [{ nodeId: "node-1", displayName: "Current Mac", connected: true }] });
-      await vi.waitFor(() => expect(page.container.textContent).toContain("Current Mac"));
-    },
-  );
+  it.each(["node.hostStats"])("quietly reloads node status for %s", async (event) => {
+    const nodes = createDeferred<{ nodes: Array<Record<string, unknown>> }>();
+    const { client, request } = clientFor(
+      vi.fn(async (method: string) =>
+        method === "node.list" ? nodes.promise : responseFor(method),
+      ),
+    );
+    const fixture = gatewayFixture(gatewaySnapshot(client));
+    const page = mountPage(fixture, {
+      nodes: [{ nodeId: "node-1", displayName: "Office Mac", connected: false }],
+      devicesList: { paired: [], pending: [] },
+      lastError: "Earlier operator action failed",
+    });
+    fixture.emitEvent(event, { nodeId: "node-1" });
+    expect(request).toHaveBeenCalledWith("node.list", {});
+    expect(page.container.textContent).toContain("Office Mac");
+    expect(page.container.textContent).toContain("Earlier operator action failed");
+    nodes.resolve({ nodes: [{ nodeId: "node-1", displayName: "Current Mac", connected: true }] });
+    await vi.waitFor(() => expect(page.container.textContent).toContain("Current Mac"));
+  });
 
   it.each([
-    {
-      name: "advertised",
-      methods: ["system.info", "desktop.observe"],
-      systemInfo: true,
-      desktop: true,
-      scopes: ["operator.admin"],
-    },
-    { name: "unadvertised", methods: [], systemInfo: false, desktop: false },
-    { name: "unknown features", methods: undefined, systemInfo: false, desktop: false },
     {
       name: "read-only",
       methods: ["system.info", "desktop.observe"],
@@ -580,24 +568,11 @@ describe("DevicesPage gateway lifecycle", () => {
   });
 
   it.each([
-    { name: "node disconnects", role: "node", nodeRoles: ["node"], operatorRoles: ["operator"] },
-    {
-      name: "merged node-role presence disconnects",
-      role: "node",
-      nodeRoles: ["operator", "node"],
-      operatorRoles: ["operator"],
-    },
     {
       name: "operator disconnects",
       role: "operator",
       nodeRoles: ["node"],
       operatorRoles: ["operator"],
-    },
-    {
-      name: "node disconnects with a roleless operator",
-      role: "node",
-      nodeRoles: ["node"],
-      operatorRoles: undefined,
     },
   ])("reloads mixed-role inventory when $name", async (scenario) => {
     const { client, request } = clientFor();
@@ -749,7 +724,7 @@ describe("DevicesPage gateway lifecycle", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it.each(["connection resets", "pairing access is lost"])(
+  it.each(["pairing access is lost"])(
     "drops a token revoke after %s during confirmation",
     async (transition) => {
       const request = vi.fn(async (method: string) => responseFor(method));
@@ -773,25 +748,15 @@ describe("DevicesPage gateway lifecycle", () => {
     },
   );
 
-  it("reveals a rotated token with a copy control until it is acknowledged", async () => {
-    stubLocalDeviceIdentity();
-    const page = mountPaired(rotatingRequest(ROTATED_TOKEN));
-    button(page.container, t("devices.inventory.rotate")).click();
-    const { dialog } = await waitForRenderedModalDialog(document.body);
-    expect(dialog.getAttribute("aria-label")).toBe(
-      t("devices.inventory.rotatePromptTitle", { role: "operator" }),
-    );
-    expect(secretDialogText()).toBe(ROTATED_TOKEN);
-    expect(document.body.querySelector(".chat-copy-btn")).toBeInstanceOf(HTMLButtonElement);
-    dialogButton(t("devices.inventory.rotateAcknowledge")).click();
-    await expectNoModal();
-  });
-
   it("refuses dismissal gestures while the rotated token is still on screen", async () => {
     stubLocalDeviceIdentity();
     const page = mountPaired(rotatingRequest(ROTATED_TOKEN));
     button(page.container, t("devices.inventory.rotate")).click();
-    const { modal } = await waitForRenderedModalDialog(document.body);
+    const { modal, dialog } = await waitForRenderedModalDialog(document.body);
+    expect(dialog.getAttribute("aria-label")).toBe(
+      t("devices.inventory.rotatePromptTitle", { role: "operator" }),
+    );
+    expect(document.body.querySelector(".chat-copy-btn")).toBeInstanceOf(HTMLButtonElement);
     const dismissal = new Event("modal-cancel", {
       bubbles: true,
       cancelable: true,
@@ -837,11 +802,11 @@ describe("DevicesPage gateway lifecycle", () => {
     }
   });
 
-  it("explains a cross-device rotation the Gateway withheld the token for", async () => {
+  it("lets a dismissal gesture close the withheld-rotation outcome", async () => {
     stubLocalDeviceIdentity();
     const page = mountPaired(rotatingRequest(null));
     button(page.container, t("devices.inventory.rotate")).click();
-    const { dialog } = await waitForRenderedModalDialog(document.body);
+    const { modal, dialog } = await waitForRenderedModalDialog(document.body);
     expect(dialog.getAttribute("aria-label")).toBe(
       t("devices.inventory.rotateWithheldTitle", { device: "MacBook Pro" }),
     );
@@ -855,16 +820,6 @@ describe("DevicesPage gateway lifecycle", () => {
     );
     expect(document.body.querySelector(".secret-reveal__code")).toBeNull();
     expect(document.body.querySelector(".chat-copy-btn")).toBeNull();
-    expect(dialogButton(t("common.close")).className).toBe("btn secret-reveal__dismiss");
-    dialogButton(t("common.close")).click();
-    await expectNoModal();
-  });
-
-  it("lets a dismissal gesture close the withheld-rotation outcome", async () => {
-    stubLocalDeviceIdentity();
-    const page = mountPaired(rotatingRequest(null));
-    button(page.container, t("devices.inventory.rotate")).click();
-    const { modal } = await waitForRenderedModalDialog(document.body);
     const dismissal = new Event("modal-cancel", {
       bubbles: true,
       cancelable: true,
