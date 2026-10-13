@@ -103,6 +103,7 @@ export type SubagentAnnounceDirectParams = {
   requesterIsSubagent: boolean;
   createUserTurnTranscriptRecorder?: (sessionId: string) => UserTurnTranscriptRecorder;
   onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void | Promise<void>;
+  onDeliveryError?: (error: unknown) => void;
   signal?: AbortSignal;
   onExecutionStarted?: () => void;
   resolveGatewayContext?: import("../../../gateway/server-methods/types.js").GatewayContextResolver;
@@ -572,6 +573,7 @@ async function sendSubagentAnnounceDirectlyBound(
           return textDelivery;
         }
       }
+      params.onDeliveryError?.(err);
       directFailure = {
         delivered: false,
         path: "direct",
@@ -664,6 +666,7 @@ async function sendSubagentAnnounceDirectlyBound(
       ? settledRecovery.delivery
       : classifyResponse({ status: "ok", result: settledRecovery.result });
   } catch (err) {
+    params.onDeliveryError?.(err);
     const disposition = hasAnnounceSendEvidence(err)
       ? "ambiguous"
       : isPermanentAnnounceDeliveryError(err)

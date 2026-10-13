@@ -1,4 +1,5 @@
 import { expectDefined } from "@openclaw/normalization-core";
+import { extractErrorCode } from "@openclaw/normalization-core/error-coercion";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -280,13 +281,18 @@ function formatConsoleMetaValue(value: unknown): string | undefined {
   return JSON.stringify(value);
 }
 
-/** Keeps an Error's message, which a JSON round-trip would otherwise reduce to `{}`. */
-function prepareConsoleMetaRecord(meta: Record<string, unknown>): Record<string, unknown> {
+/** Preserve native error diagnostics before any sink reduces non-enumerable fields to `{}`. */
+function prepareLogMetaRecord(meta: Record<string, unknown>): Record<string, unknown> {
   let prepared: Record<string, unknown> | undefined;
   for (const [key, value] of Object.entries(meta)) {
     if (value instanceof Error) {
       prepared ??= { ...meta };
-      prepared[key] = value.message;
+      prepared[key] = Object.assign({}, value, {
+        name: value.name,
+        message: value.message,
+        errorCode: extractErrorCode(value),
+        stack: value.stack?.split("\n").slice(0, 6).join("\n"),
+      });
     }
   }
   return prepared ?? meta;
@@ -307,7 +313,7 @@ function prepareConsoleMetaRecord(meta: Record<string, unknown>): Record<string,
 function formatConsoleMeta(meta: Record<string, unknown>): string {
   let redacted: Record<string, unknown>;
   try {
-    redacted = redactLogRecordForTransport(prepareConsoleMetaRecord(meta));
+    redacted = redactLogRecordForTransport(meta);
   } catch {
     // A record this sink cannot serialize must not cost the console its message.
     // The file log and `openclaw logs --json` remain the full-fidelity record.
@@ -389,7 +395,7 @@ export function createSubsystemLogger(subsystem: string): SubsystemLogger {
       if (typeof consoleMessage === "string") {
         consoleMessageOverride = consoleMessage;
       }
-      fileMeta = Object.keys(rest).length > 0 ? rest : undefined;
+      fileMeta = Object.keys(rest).length > 0 ? prepareLogMetaRecord(rest) : undefined;
     }
     if (fileEnabled) {
       logToFile(getFileLogger(level), level, message, fileMeta);
