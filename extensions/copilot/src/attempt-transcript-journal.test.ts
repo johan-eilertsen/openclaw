@@ -170,6 +170,41 @@ describe("Copilot attempt transcript journal", () => {
     ]);
   });
 
+  it("replaces the originally staged user when async resolution changes it", async () => {
+    const { journal, recorder } = await createFixture();
+    recorder.resolveMessage.mockResolvedValue({
+      role: "user",
+      content: "resolved user",
+      timestamp: 2,
+    });
+
+    await journal.persistInitialUser();
+
+    expect(journal.snapshot().messagesSnapshot).toMatchObject([
+      { role: "user", content: "resolved user" },
+    ]);
+  });
+
+  it("publishes the storage anchor without treating a replay as a fresh user append", async () => {
+    const { journal, recorder } = await createFixture();
+
+    await journal.persistInitialUser();
+
+    const anchor = recorder.markRuntimePersisted.mock.calls[0]?.[1];
+    expect(anchor).toBeDefined();
+    expect(journal.snapshot().terminalAnchor).toEqual(anchor);
+    expect(recorder.getAdmissionReceipt()).toEqual({
+      ...anchor,
+      logicalTurnId: "logical-turn-1",
+      role: "user",
+    });
+    await journal.persistInitialUser();
+    expect(recorder.markRuntimePersisted.mock.calls.map((call) => call[2])).toEqual([
+      { appended: true },
+      { appended: false },
+    ]);
+  });
+
   it.each(["unchanged", "sdk-rewrite", "hook-rewrite", "hook-metadata"] as const)(
     "keeps selected steering mentions only on unchanged committed text (%s)",
     async (rewrite) => {
@@ -326,6 +361,32 @@ describe("Copilot attempt transcript journal", () => {
     }
   });
 
+  it("marks durable skill injection replay-incomplete", async () => {
+    const { journal, session } = await createFixture();
+    await journal.persistInitialUser();
+    session.emit(
+      event("skill.invoked", "skill-invoked", {
+        content: "full injected skill content",
+        name: "example-skill",
+        path: "/skills/example/SKILL.md",
+      }),
+    );
+    await journal.barrier("skill invocation");
+
+    expect(journal.snapshot().replayInvalid).toBe(true);
+  });
+
+  it("marks durable system notifications replay-incomplete", async () => {
+    const { journal, session } = await createFixture();
+    await journal.persistInitialUser();
+    session.emit(
+      event("system.notification", "system-notification", { content: "background task done" }),
+    );
+    await journal.barrier("system notification");
+
+    expect(journal.snapshot().replayInvalid).toBe(true);
+  });
+
   it("marks orphaned durable reasoning replay-incomplete at terminal flush", async () => {
     const { bridge, journal, session, target } = await createFixture();
     await journal.persistInitialUser();
@@ -368,6 +429,35 @@ describe("Copilot attempt transcript journal", () => {
     expect(
       transcriptMessages(await readSessionTranscriptEvents(target)).map((row) => row.message.role),
     ).toEqual(["user"]);
+  });
+
+  it("keeps replay valid for semantically equal hook payloads with reordered keys", async () => {
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([
+        {
+          hookName: "before_message_write",
+          handler: (input: unknown) => {
+            const message = (input as { message: AgentMessage }).message;
+            if (message.role !== "assistant") {
+              return undefined;
+            }
+            return {
+              message: {
+                ...message,
+                content: message.content.map((part) =>
+                  part.type === "text" ? { type: "text" as const, text: part.text } : part,
+                ),
+              },
+            };
+          },
+        },
+      ]),
+    );
+    const { journal, session } = await createInitializedFixture();
+    emitAssistant(session, "same-content", { content: "same" });
+    await journal.barrier("same semantic content");
+
+    expect(journal.snapshot().replayInvalid).toBe(false);
   });
 
   it("rejects structurally destructive singleton hook replacements", async () => {
@@ -638,6 +728,34 @@ describe("Copilot attempt transcript journal", () => {
       })?.content,
     ).toEqual([{ type: "text", text: "checking now" }]);
     expect(journal.snapshot().replayInvalid).toBe(true);
+  });
+
+  it("keeps ephemeral deltas out of the durable assistant row", async () => {
+    const { journal, session, target } = await createInitializedFixture();
+    session.emit({
+      ...event("assistant.message_delta", "ephemeral-text", {
+        deltaContent: "stream-only text",
+        messageId: "stream-only",
+      }),
+      ephemeral: true,
+    } as SessionEvent);
+    session.emit({
+      ...event("assistant.reasoning_delta", "ephemeral-reasoning", {
+        deltaContent: "stream-only reasoning",
+        reasoningId: "stream-reasoning",
+      }),
+      ephemeral: true,
+    } as SessionEvent);
+    emitAssistant(session, "durable-assistant", { content: "visible" });
+    await journal.barrier("ephemeral deltas");
+
+    const assistant = transcriptMessages(await readSessionTranscriptEvents(target)).find(
+      (row) => row.message.role === "assistant",
+    )?.message;
+    expect(assistant).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "visible" }],
+    });
   });
 
   it("clears prior assistant ownership when the final durable projection is empty", async () => {

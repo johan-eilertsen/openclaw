@@ -21,7 +21,7 @@ describe("public X context", () => {
     expect(api.getPublicPosts).not.toHaveBeenCalled();
   });
 
-  it.each(["protected", "unknown", "missing", "changed", "withheld"])(
+  it.each(["public", "protected", "unknown", "missing", "changed", "withheld", "error"])(
     "fails closed for %s context",
     async (kind) => {
       const data = page();
@@ -41,9 +41,16 @@ describe("public X context", () => {
         data.data = [{ ...post, withheld: true }];
       }
       const api = {
-        getPublicPosts: vi.fn(async () => data),
+        getPublicPosts: vi.fn(async () => {
+          if (kind === "error") {
+            throw new Error("unavailable");
+          }
+          return data;
+        }),
       };
-      expect(await verifyPublicXThread(api, [post], new AbortController().signal, "1")).toBe(false);
+      expect(await verifyPublicXThread(api, [post], new AbortController().signal, "1")).toBe(
+        kind === "public",
+      );
     },
   );
 

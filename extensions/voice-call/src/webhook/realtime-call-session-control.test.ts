@@ -43,8 +43,8 @@ describe("realtime call activity pause", () => {
 });
 
 describe("realtime call session control", () => {
-  it.each(["playing", "queued"] as const)(
-    "interrupts a consult while model audio is active (%s)",
+  it.each(["silent", "playing", "queued"] as const)(
+    "interrupts a consult only while model audio is active (%s)",
     (playback) => {
       vi.useFakeTimers();
       const sent: string[] = [];
@@ -81,7 +81,7 @@ describe("realtime call session control", () => {
       }
       try {
         controller.cancelOutputAudioForBargeIn("local", () => consult.abort());
-        expect(consult.signal.aborted).toBe(true);
+        expect(consult.signal.aborted).toBe(playback !== "silent");
         expect(sent).toContain("clear");
       } finally {
         audioPacer.close();
@@ -122,7 +122,7 @@ describe("realtime call session control", () => {
     expect(triggerGreeting).toHaveBeenCalledWith("Exact greeting");
   });
 
-  it.each(["unknown", "timeout"])(
+  it.each(["human", "unknown", "timeout", "machine_start", "machine_end_other"])(
     "holds the realtime opening and audio until AMD returns %s",
     async (classification) => {
       vi.useFakeTimers();
@@ -147,15 +147,45 @@ describe("realtime call session control", () => {
       } else {
         call.metadata = { ...call.metadata, answeredBy: classification };
       }
-      expect(controller.isBlocked()).toBe(false);
+      const machine = classification.startsWith("machine_");
+      expect(controller.isBlocked()).toBe(machine);
       await vi.advanceTimersByTimeAsync(40_000);
-      expect(triggerGreeting).toHaveBeenCalledExactlyOnceWith("Exact opening");
-      call.metadata = { ...call.metadata, answeredBy: "machine_end_other" };
-      expect(controller.isBlocked()).toBe(true);
-      expect(controller.claim()).toBe(false);
+      if (machine) {
+        expect(triggerGreeting).not.toHaveBeenCalled();
+        expect(controller.claim()).toBe(false);
+        call.metadata = { ...call.metadata, answeredBy: "unknown" };
+        expect(controller.isBlocked()).toBe(true);
+      } else {
+        expect(triggerGreeting).toHaveBeenCalledExactlyOnceWith("Exact opening");
+        call.metadata = { ...call.metadata, answeredBy: "machine_end_other" };
+        expect(controller.isBlocked()).toBe(true);
+        expect(controller.claim()).toBe(false);
+      }
       controller.close();
     },
   );
+
+  it("uses the operator's AMD hold cap when no classification arrives", async () => {
+    vi.useFakeTimers();
+    const triggerGreeting = vi.fn();
+    const controller = createOutboundGreetingController({
+      enabled: true,
+      instructions: "Exact opening",
+      holdOpeningMaxMs: 45_000,
+      call: {
+        direction: "outbound",
+        metadata: { voicemailManagedByHost: true, mode: "conversation" },
+      },
+    });
+    controller.onReady({ triggerGreeting } as unknown as RealtimeVoiceBridgeSession);
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(controller.isBlocked()).toBe(true);
+    expect(triggerGreeting).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(controller.isBlocked()).toBe(false);
+    expect(triggerGreeting).toHaveBeenCalledExactlyOnceWith("Exact opening");
+    controller.close();
+  });
 
   it("cancels a pending AMD opening when the bridge closes", async () => {
     vi.useFakeTimers();

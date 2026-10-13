@@ -212,7 +212,7 @@ describe("guarded fetch policy", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
-  it.each(["64:ff9b::a9fe:a9fe"])(
+  it.each(["64:ff9b::a9fe:a9fe", "64:ff9b:1:808:808:808:a9fe:a9fe", "100.100.100.200"])(
     "does not promote exact-origin trust into access to %s",
     async (address) => {
       const fetchImpl = fetchStub();
@@ -242,6 +242,21 @@ describe("guarded fetch policy", () => {
     );
     await expect(guardedRequest(fetchImpl)).rejects.toThrow("fetch failed");
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("ignores dispatcher support markers on explicit ambient fetch", async () => {
+    const runtimeFetch = fetchStub();
+    const ambient = Object.assign(
+      async () => {
+        throw new Error("ambient fetch cannot pin DNS");
+      },
+      { __openclawAcceptsDispatcher: true },
+    );
+    vi.stubGlobal("fetch", ambient);
+    installRuntime(runtimeFetch);
+    const result = await guardedRequest(ambient);
+    expect(runtimeFetch).toHaveBeenCalledOnce();
+    await result.release();
   });
 
   it("keeps explicit proxy transport policy with DNS pinning disabled", async () => {
@@ -515,6 +530,7 @@ describe("proxy routing and trust", () => {
   it.each([
     { mode: "strict", active: true, bypass: true, proxy: false },
     { mode: "trusted_env_proxy", active: false, bypass: false, proxy: true },
+    { mode: "trusted_env_proxy", active: false, bypass: true, proxy: false },
   ] as const)(
     "routes $mode with active=$active and NO_PROXY=$bypass",
     async ({ mode, active, bypass, proxy }) => {
@@ -801,7 +817,7 @@ describe("request lifecycle", () => {
     }
   });
 
-  it.each([5_000])(
+  it.each([undefined, 5_000, 2_000_000])(
     "keeps inherited stream and explicit request deadlines separate (%s)",
     async (timeoutMs) => {
       const previous = getGlobalDispatcher();

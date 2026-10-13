@@ -20,6 +20,7 @@ import { handleDiscordMessageAction } from "./handle-action.js";
 import { handleDiscordGuildAction } from "./runtime.guild.js";
 import { handleDiscordAction } from "./runtime.js";
 import { handleDiscordMessagingAction } from "./runtime.messaging.js";
+import { handleDiscordModerationAction } from "./runtime.moderation.js";
 
 type DiscordChannelInfoTest = {
   id: string;
@@ -140,6 +141,7 @@ const {
   fetchReactionsDiscord,
   fetchMessageDiscord,
   fetchRoleInfoDiscord,
+  fetchVoiceStatusDiscord,
   hasAnyChannelPermissionDiscord,
   hasAnyGuildPermissionDiscord,
   listGuildChannelsDiscord,
@@ -226,6 +228,18 @@ function handleGuildAction(
   return handleDiscordGuildAction(action, params, isActionEnabled, cfg, options);
 }
 
+function handleModerationAction(
+  action: string,
+  params: Record<string, unknown>,
+  isActionEnabled: (
+    key: keyof DiscordActionConfig,
+    defaultValue?: boolean,
+  ) => boolean = enableAllActions,
+  cfg: OpenClawConfig = DISCORD_TEST_CFG,
+) {
+  return handleDiscordModerationAction(action, params, isActionEnabled, cfg);
+}
+
 async function expectBlockedRead(
   provider: MockCallSource,
   ...args: Parameters<typeof handleMessagingAction>
@@ -237,6 +251,7 @@ async function expectBlockedRead(
 }
 const disabledActions = (key: keyof DiscordActionConfig) => key !== "reactions";
 const channelInfoEnabled = (key: keyof DiscordActionConfig) => key === "channelInfo";
+const moderationEnabled = (key: keyof DiscordActionConfig) => key === "moderation";
 const rolesEnabled = (key: keyof DiscordActionConfig) => key === "roles";
 
 beforeEach(() => {
@@ -277,6 +292,17 @@ describe("handleDiscordMessagingAction", () => {
         source: "discord.threadList.archived",
         nextBefore: "2026-05-25T17:00:00.000Z",
       },
+    },
+    {
+      name: "archived page without archive timestamps",
+      params: { guildId: "G1", channelId: "C1", includeArchived: true, limit: 1 },
+      page: {
+        threads: [{ id: "thread-without-archive-timestamp", name: "Legacy project" }],
+        members: [],
+        has_more: true,
+      },
+      cfg: DISCORD_TEST_CFG,
+      expected: { complete: false, hasMore: true, source: "discord.threadList.archived" },
     },
     {
       name: "complete active page",
@@ -343,24 +369,24 @@ describe("handleDiscordMessagingAction", () => {
     });
   });
 
-  it.each([{ name: "DM", type: ChannelType.DM }])(
-    "blocks delegated reads of arbitrary Discord $name targets",
-    async ({ type }) => {
-      fetchChannelInfoDiscord.mockResolvedValueOnce({
-        id: "DM1",
-        type,
-      });
+  it.each([
+    { name: "DM", type: ChannelType.DM },
+    { name: "GroupDM", type: ChannelType.GroupDM },
+  ])("blocks delegated reads of arbitrary Discord $name targets", async ({ type }) => {
+    fetchChannelInfoDiscord.mockResolvedValueOnce({
+      id: "DM1",
+      type,
+    });
 
-      await expect(
-        handleMessagingAction("reactions", {
-          to: "channel:DM1",
-          messageId: "M1",
-        }),
-      ).rejects.toThrow("Discord read target channel is not allowed.");
+    await expect(
+      handleMessagingAction("reactions", {
+        to: "channel:DM1",
+        messageId: "M1",
+      }),
+    ).rejects.toThrow("Discord read target channel is not allowed.");
 
-      expect(fetchReactionsDiscord).not.toHaveBeenCalled();
-    },
-  );
+    expect(fetchReactionsDiscord).not.toHaveBeenCalled();
+  });
 
   it.each([
     {
@@ -660,6 +686,10 @@ describe("handleDiscordMessagingAction", () => {
 
   it.each([
     {
+      name: "delegated",
+      options: undefined,
+    },
+    {
       name: "direct operator",
       options: { conversationReadOrigin: "direct-operator" as const },
     },
@@ -800,6 +830,14 @@ describe("handleDiscordMessagingAction", () => {
       cfg: discordGuildChannelsCfg({ "222": { enabled: false }, "333": { enabled: true } }),
       options: undefined,
     },
+    {
+      name: "explicit guild with disabled ancestry",
+      action: "fetchMessage",
+      params: { guildId: "111", channelId: "333", messageId: "message-1" },
+      runtime: fetchMessageDiscord,
+      cfg: discordGuildChannelsCfg({ "222": { enabled: false }, "333": { enabled: true } }),
+      options: undefined,
+    },
   ])(
     "fails closed for $name when channel metadata is unavailable",
     async ({ action, params, runtime, cfg, options }) => {
@@ -816,6 +854,14 @@ describe("handleDiscordMessagingAction", () => {
       expected: {
         channelId: "222",
         messages: [{ timestampMs: 1768471200000, timestampUtc: "2026-01-15T10:00:00.000Z" }],
+      },
+    },
+    {
+      action: "fetchMessage",
+      params: { messageLink: "https://discord.com/channels/111/222/333" },
+      timestamp: "2026-01-15T11:00:00.000Z",
+      expected: {
+        message: { timestampMs: 1768474800000, timestampUtc: "2026-01-15T11:00:00.000Z" },
       },
     },
   ])(
@@ -896,6 +942,14 @@ describe("handleDiscordMessagingAction", () => {
 
   it.each([
     {
+      name: "DM paired with caller-supplied guild",
+      action: "fetchMessage",
+      params: { guildId: "G1", channelId: "DM1", messageId: "M1" },
+      channel: { id: "DM1", type: ChannelType.DM },
+      cfg: DISCORD_TEST_CFG,
+      runtime: fetchMessageDiscord,
+    },
+    {
       name: "message link to a different guild",
       action: "fetchMessage",
       params: { messageLink: "https://discord.com/channels/111/333/444" },
@@ -931,6 +985,12 @@ describe("handleDiscordMessagingAction", () => {
   });
 
   it.each([
+    {
+      name: "delegated allowlist",
+      cfg: discordGuildChannelsCfg({ "222": { enabled: true } }),
+      content: "canary",
+      options: undefined,
+    },
     {
       name: "direct operator with disabled channels",
       cfg: discordGuildChannelsCfg({ blocked: { enabled: false } }),
@@ -1263,6 +1323,7 @@ describe("handleDiscordMessagingAction", () => {
   );
 
   it.each([
+    { label: "forum message", parentType: ChannelType.GuildForum, components: false },
     { label: "media component media", parentType: ChannelType.GuildMedia, components: true },
   ])("renames the newly created $label thread", async ({ parentType, components }) => {
     const sender = components ? sendDiscordComponentMessage : sendMessageDiscord;
@@ -1562,6 +1623,16 @@ describe("handleDiscordGuildAction", () => {
   });
 
   it.each([
+    {
+      action: "memberInfo",
+      params: { guildId: "333", userId: "U1" },
+      runtimeCall: fetchMemberInfoDiscord,
+    },
+    {
+      action: "voiceStatus",
+      params: { guildId: "333", userId: "U1" },
+      runtimeCall: fetchVoiceStatusDiscord,
+    },
     { action: "eventList", params: { guildId: "333" }, runtimeCall: listScheduledEventsDiscord },
     {
       action: "memberInfo",
@@ -1745,6 +1816,11 @@ describe("handleDiscordGuildAction - channel management", () => {
     permissions: bigint[];
   }>([
     {
+      name: "uses thread permissions for Discord sender thread edits",
+      params: { archived: true },
+      permissions: [PermissionFlagsBits.ManageThreads],
+    },
+    {
       name: "requires ManageThreads to reopen locked Discord sender threads",
       params: { archived: false },
       previouslyLocked: true,
@@ -1848,6 +1924,31 @@ describe("handleDiscordGuildAction - channel management", () => {
 
   it.each([
     {
+      action: "channelEdit",
+      params: { channelId: "C1", archived: true, locked: false, autoArchiveDuration: 1440 },
+      call: editChannelDiscord,
+      expected: [
+        {
+          channelId: "C1",
+          name: undefined,
+          topic: undefined,
+          position: undefined,
+          parentId: undefined,
+          nsfw: undefined,
+          rateLimitPerUser: undefined,
+          archived: true,
+          locked: false,
+          autoArchiveDuration: 1440,
+        },
+      ],
+    },
+    {
+      action: "channelMove",
+      params: { guildId: "G1", channelId: "C1", parentId: "P1", position: 5 },
+      call: moveChannelDiscord,
+      expected: [{ guildId: "G1", channelId: "C1", parentId: "P1", position: 5 }],
+    },
+    {
       action: "categoryCreate",
       params: { guildId: "G1", name: "My Category" },
       call: createChannelDiscord,
@@ -1864,6 +1965,25 @@ describe("handleDiscordGuildAction - channel management", () => {
       params: { categoryId: "CAT1" },
       call: deleteChannelDiscord,
       expected: ["CAT1"],
+    },
+    {
+      action: "channelEdit",
+      params: { channelId: "C1", clearParent: true },
+      call: editChannelDiscord,
+      expected: [
+        {
+          channelId: "C1",
+          name: undefined,
+          topic: undefined,
+          position: undefined,
+          parentId: null,
+          nsfw: undefined,
+          rateLimitPerUser: undefined,
+          archived: undefined,
+          locked: undefined,
+          autoArchiveDuration: undefined,
+        },
+      ],
     },
     {
       action: "channelMove",
@@ -1954,6 +2074,46 @@ describe("handleDiscordGuildAction - channel management", () => {
 
 describe("Discord action numeric validation", () => {
   it.each([
+    {
+      action: "reactions",
+      params: { channelId: "C1", messageId: "M1", limit: 2.5 },
+      handle: handleMessagingAction,
+      gate: enableAllActions,
+      call: fetchReactionsDiscord,
+      error: "limit must be a positive integer",
+    },
+    {
+      action: "readMessages",
+      params: { channelId: "C1", limit: "3.5" },
+      handle: handleMessagingAction,
+      gate: enableAllActions,
+      call: readMessagesDiscord,
+      error: "limit must be a positive integer",
+    },
+    {
+      action: "channelEdit",
+      params: { channelId: "C1", position: 1.5 },
+      handle: handleGuildAction,
+      gate: channelsEnabled,
+      call: editChannelDiscord,
+      error: "position must be a non-negative integer",
+    },
+    {
+      action: "channelMove",
+      params: { guildId: "G1", channelId: "C1", position: "5.5" },
+      handle: handleGuildAction,
+      gate: channelsEnabled,
+      call: moveChannelDiscord,
+      error: "position must be a non-negative integer",
+    },
+    {
+      action: "timeout",
+      params: { guildId: "G1", userId: "U1", durationMinutes: 5.5 },
+      handle: handleModerationAction,
+      gate: moderationEnabled,
+      call: timeoutMemberDiscord,
+      error: "durationMinutes must be a non-negative integer",
+    },
     {
       action: "threadCreate",
       params: { channelId: "C1", name: "thread", autoArchiveMinutes: 999 },

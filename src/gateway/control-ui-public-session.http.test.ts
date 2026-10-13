@@ -241,7 +241,7 @@ describe("anonymous public session HTTP boundary", () => {
     },
   );
 
-  it.each([""])(
+  it.each(["", "/control"])(
     "serves a redacted, cached card through the public boundary (%s)",
     async (basePath) => {
       const server = createPublicGateway(basePath);
@@ -401,6 +401,18 @@ describe("anonymous public session HTTP boundary", () => {
     expect(response.getBody()).toContain(`href="${requestPath()}">Refresh now</a>`);
   });
 
+  it("rejects public bearer traffic over remote plaintext HTTP", async () => {
+    const response = await send(
+      createPublicGateway("", {
+        gateway: { publicOrigin: "http://gateway.example.test" },
+      }),
+      { remoteAddress: "203.0.113.12" },
+    );
+    expect(response.res.statusCode).toBe(404);
+    expect(tokenResolver).not.toHaveBeenCalled();
+    expect(reader).not.toHaveBeenCalled();
+  });
+
   it("rejects a direct remote plaintext request despite an HTTPS public origin", async () => {
     const response = await send(
       createPublicGateway("", {
@@ -429,6 +441,14 @@ describe("anonymous public session HTTP boundary", () => {
     expect(response.res.statusCode).toBe(404);
     expect(tokenResolver).not.toHaveBeenCalled();
     expect(reader).not.toHaveBeenCalled();
+  });
+
+  it("rechecks revocation after coalesced work before writing the response", async () => {
+    shareActive.mockReturnValue(false);
+    const response = await send(createPublicGateway());
+    expect(response.res.statusCode).toBe(404);
+    expect(response.getBody()).toBe("This public session is unavailable.");
+    expect(response.getBody()).not.toContain("The public viewer is ready.");
   });
 
   it("caps aggregate requests to one publication across clients", async () => {

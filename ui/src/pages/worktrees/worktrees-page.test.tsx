@@ -617,6 +617,29 @@ describe("WorktreesPage lifecycle", () => {
     expect(page.model.operation).toBeNull();
   });
 
+  it("surfaces an operation failure after an earlier list failure", async () => {
+    let listRequests = 0;
+    const request = vi.fn((method: string) => {
+      if (method === "worktrees.list") {
+        listRequests += 1;
+        return listRequests === 1
+          ? Promise.reject(new Error("stale list failure"))
+          : Promise.resolve({ worktrees: [] });
+      }
+      if (method === "worktrees.restore") {
+        return Promise.reject(new Error("restore failed"));
+      }
+      return Promise.resolve({});
+    });
+    const page = createWorktreesPage(request);
+    page.mount();
+    await waitForSolid(() => expect(page.model.error).toBe("stale list failure"));
+
+    await page.model.restore(worktree());
+
+    expect(page.model.error).toBe("restore failed");
+  });
+
   it("clears pending create state across a same-client reconnect", async () => {
     const pendingCreate = deferred<unknown>();
     const request = vi.fn((method: string) => {
@@ -770,7 +793,7 @@ describe("WorktreesPage lifecycle", () => {
     expect(freshInputs.every((input) => !input.disabled)).toBe(true);
   });
 
-  it.each([undefined])(
+  it.each([undefined, "main"])(
     "leaves base resolution to the Gateway (remote default: %s)",
     async (defaultBranch) => {
       const request = vi.fn((method: string) => {

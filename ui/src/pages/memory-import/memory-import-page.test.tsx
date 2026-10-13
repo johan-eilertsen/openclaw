@@ -253,6 +253,30 @@ describe("MemoryImportPage", () => {
     expect(page.textContent).toContain("Memory import requires operator.admin access.");
   });
 
+  it("keeps a failed plan stable until the operator explicitly refreshes", async () => {
+    const request = vi.fn(async () => {
+      throw new Error("planning unavailable: OPENAI_API_KEY=sk-1234567890abcdef");
+    });
+    const page = await mountPage(createContext(request));
+
+    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(1));
+    flush();
+    await Promise.resolve();
+    flush();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(page.textContent).toContain("planning unavailable: OPENAI_API_KEY=sk-123...cdef");
+    expect(page.textContent).not.toContain("sk-1234567890abcdef");
+
+    const refresh = [...page.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === "Refresh",
+    );
+    if (!refresh) {
+      throw new Error("expected Refresh button");
+    }
+    refresh.click();
+    await waitForMemoryImport(() => expect(request).toHaveBeenCalledTimes(2));
+  });
+
   it("keeps apply recovery results visible when the follow-up plan fails", async () => {
     let planRequests = 0;
     const request = vi.fn(async (method: string) => {
