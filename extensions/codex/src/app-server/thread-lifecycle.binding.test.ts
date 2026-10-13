@@ -1731,7 +1731,7 @@ describe("Codex app-server thread lifecycle bindings", () => {
         request.mock.calls
           .filter(([method]) => method.startsWith("thread/"))
           .map(([method, requestParams]) => [method, requestParams]);
-      const secondTurn = {
+      const secondTurn: Parameters<typeof startOrResumeThread>[0] = {
         ...common,
         developerInstructions: policy,
         refreshableInstructions: skills,

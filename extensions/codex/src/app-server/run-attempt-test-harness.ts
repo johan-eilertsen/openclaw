@@ -608,7 +608,7 @@ export function createStartedThreadHarness(
 export function createResumeHarness(
   threadId = "thread-existing",
   requestImpl: Parameters<typeof createAppServerHarness>[0] = async () => undefined,
-  persistedThread?: ReturnType<typeof threadStartResult>,
+  persistedThread?: ReturnType<typeof threadStartResult> & { thread: { model?: string | null } },
 ) {
   return createAppServerHarness(
     async (method, params, requestOptions) => {
