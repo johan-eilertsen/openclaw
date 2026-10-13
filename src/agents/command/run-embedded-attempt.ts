@@ -685,7 +685,7 @@ export async function runEmbeddedAgentAttempt(params: RunEmbeddedAgentAttemptPar
           lifecycle.emitBasicError("Agent run failed");
           await fallbackTrajectoryRecorder?.flush();
           await deferredLifecycle.complete();
-          throw new Error(retryLimitMessage, { cause: err });
+          throw new Error(retryLimitMessage, { cause: caught });
         }
         // The session writer already admitted this selection; retrying does not make a new choice.
         if (storedModelOverride || err.model !== model || err.provider !== provider) {
