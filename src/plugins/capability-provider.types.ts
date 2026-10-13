@@ -3,6 +3,7 @@ import type {
   WorkerExecutionMode,
   WorkerMachineOption as ProtocolWorkerMachineOption,
   WorkerOperatingSystem as ProtocolWorkerOperatingSystem,
+  WorkerEnvironmentStartStatus,
 } from "../../packages/gateway-protocol/src/schema/environments.js";
 import type { SecretRef } from "../config/types.secrets.js";
 import type { ImageGenerationProvider } from "../image-generation/types.js";
@@ -340,6 +341,8 @@ export type WorkerProvider = {
     options?: {
       /** Configured profile id for display; settings and operation id own allocation identity. */
       profileId?: string;
+      /** Attempt-scoped display facts; the host rejects reports after provisioning closes. */
+      reportStartStatus?: (status: WorkerEnvironmentStartStatus) => void;
       /** Cancel this attempt; settle its active commands before rejecting. Cleanup proves release separately. */
       signal?: AbortSignal;
       /** Modern hosts supply authority; legacy optionality is source compatibility only. */

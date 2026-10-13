@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import type { RetainedOperation, RetainedOutcome } from "@openclaw/worker-runtime/lifecycle";
 import { getStateDatabaseSchemaLease } from "../infra/gateway-state-owner.js";
+import { resolveImmutableSqliteFileUri } from "../infra/node-sqlite.js";
 import { throwSqliteLifecycleErrors } from "../infra/sqlite-lifecycle-errors.js";
 import { retainSnapshotTempDirectory } from "../infra/sqlite-readonly-location-cleanup.js";
 import { prepareSqliteReadOnlyLocationFromOwnedDatabase } from "../infra/sqlite-readonly-location.js";
@@ -53,6 +54,7 @@ type Selection = {
   pathname: string;
   snapshot?: {
     location: string;
+    cleanClose?: boolean;
     cleanupRoot?: string;
     assertCurrent?(): void;
     release?(): void;
@@ -387,7 +389,7 @@ export function startOpenClawStateReadOperation(
   }
 
   function query() {
-    if (!snapshot && !prepared) {
+    if ((!snapshot && !prepared) || snapshot?.cleanClose) {
       expectedIdentity = context.admission.identity.key;
     }
     if (prepared) {
@@ -406,7 +408,9 @@ export function startOpenClawStateReadOperation(
       transport.startRead(
         {
           context,
-          location: prepared?.location ?? snapshot?.location ?? pathname,
+          location: snapshot?.cleanClose
+            ? resolveImmutableSqliteFileUri(snapshot.location)
+            : (prepared?.location ?? snapshot?.location ?? pathname),
           checkFreshAdmission: !borrowed,
           expectedIdentity,
           snapshotRoot: prepared?.cleanupRoot ?? snapshot?.cleanupRoot,
