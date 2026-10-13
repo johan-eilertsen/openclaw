@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import vm from "node:vm";
 import { describe, expect, it, vi } from "vitest";
+import type { SpawnResult } from "../../process/exec.js";
 import type { EnvironmentRecipe } from "./environment-recipe.js";
 import { runWorkerProjectLifecycle } from "./project-setup-script.js";
 import type { WorkerTunnelHandle } from "./tunnel-contract.js";
@@ -15,7 +16,7 @@ function lifecycleTransport(failExecutable?: string) {
     env: Record<string, string>;
   }[] = [];
   const tunnel: Pick<WorkerTunnelHandle, "runWorkspaceCommand"> = {
-    runWorkspaceCommand: vi.fn(async (command) => {
+    runWorkspaceCommand: vi.fn(async (command): Promise<SpawnResult> => {
       command.assertCurrent?.();
       const process = Object.assign(new EventEmitter(), {
         env: { PATH: "/worker/bin", HOME: "/worker/home", PRIVATE_FIXTURE: "not inherited" },

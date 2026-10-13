@@ -58,6 +58,8 @@ const supportedProperties = new Set([
   "name",
   "$schema",
 ]);
+const enableCorepack =
+  'mkdir -p "$HOME/.local/bin" && corepack enable --install-directory "$HOME/.local/bin" && PATH="$HOME/.local/bin:$PATH"';
 
 function parseDevcontainer(entry: EnvironmentRecipeEntry, file: string): EnvironmentRecipe {
   if (entry.content === undefined) {
@@ -144,8 +146,7 @@ export async function resolveEnvironmentRecipe(
     }
     let detectedInstall: LifecycleCommand;
     if (file === "pnpm-lock.yaml") {
-      detectedInstall =
-        'mkdir -p "$HOME/.local/bin" && corepack enable --install-directory "$HOME/.local/bin" && PATH="$HOME/.local/bin:$PATH" pnpm install --frozen-lockfile';
+      detectedInstall = `${enableCorepack} pnpm install --frozen-lockfile`;
     } else if (file === "yarn.lock") {
       const yarnConfig = await readEntry(".yarnrc.yml");
       if (yarnConfig) {
@@ -153,7 +154,7 @@ export async function resolveEnvironmentRecipe(
       }
       const major = yarnMajor(packageEntry);
       const berry = major !== undefined ? major >= 2 : yarnConfig !== undefined;
-      detectedInstall = ["yarn", "install", berry ? "--immutable" : "--frozen-lockfile"];
+      detectedInstall = `${enableCorepack} yarn install ${berry ? "--immutable" : "--frozen-lockfile"}`;
     } else if (file === "package-lock.json") {
       detectedInstall = ["npm", "ci"];
     } else {
@@ -165,7 +166,7 @@ export async function resolveEnvironmentRecipe(
       identity: createHash("sha256")
         .update(
           JSON.stringify({
-            version: 1,
+            version: 2,
             inputs: Object.entries(inputs).toSorted(([left], [right]) =>
               left.localeCompare(right, "en"),
             ),

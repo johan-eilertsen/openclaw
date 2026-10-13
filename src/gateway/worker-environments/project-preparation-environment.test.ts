@@ -109,15 +109,22 @@ describe("repository environment preparation", () => {
   });
 
   it.each(["pnpm-lock.yaml", "yarn.lock"])(
-    "keeps Corepack from auto-pinning package metadata during %s detection",
+    "installs through user-writable Corepack shims without auto-pinning during %s detection",
     async (lockfile) => {
       const packageContent = '{"name":"fixture","private":true}\n';
       const f = await fixture({ [lockfile]: "fixture lock\n", "package.json": packageContent });
       const bin = path.join(f.home, "fixture-bin");
       await fs.mkdir(bin);
-      await fs.writeFile(path.join(bin, "corepack"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+      const manager = lockfile === "yarn.lock" ? "yarn" : "pnpm";
       await fs.writeFile(
-        path.join(bin, lockfile === "yarn.lock" ? "yarn" : "pnpm"),
+        path.join(bin, "corepack"),
+        '#!/bin/sh\nset -eu\ntest "$1" = enable\ntest "$2" = --install-directory\ntest "$3" = "$HOME/.local/bin"\n' +
+          `cp "$(dirname "$0")/package-manager" "$3/${manager}"\n`,
+        { mode: 0o755 },
+      );
+      await fs.writeFile(path.join(bin, manager), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      await fs.writeFile(
+        path.join(bin, "package-manager"),
         '#!/bin/sh\nif [ "${COREPACK_ENABLE_AUTO_PIN:-}" != 0 ]; then printf \'{"packageManager":"fixture"}\\n\' > package.json; fi\n',
         { mode: 0o755 },
       );

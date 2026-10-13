@@ -152,6 +152,7 @@ describe("prepared project retention compatibility", () => {
     sourceAdmission.mockResolvedValue({
       project,
       setupRecipe: undefined,
+      recipe: { source: "none", inputs: {}, env: {} },
       assertCurrent: () => {},
       revalidate: async () => {},
       prepareGitPack,

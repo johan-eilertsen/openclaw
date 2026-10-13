@@ -64,12 +64,12 @@ Container-specific or unsupported properties never fail preparation. OpenClaw re
 
 With neither a devcontainer file nor an executable fallback script, OpenClaw chooses the first matching JavaScript lockfile:
 
-| Lockfile                  | Preparation                                                                                                                                   |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm-lock.yaml`          | Enable Corepack shims in a user-writable directory, without `sudo`, then `pnpm install --frozen-lockfile`                                     |
-| `yarn.lock`               | `yarn install --immutable` for Berry, detected from `packageManager` or `.yarnrc.yml`; otherwise `yarn install --frozen-lockfile` for Classic |
-| `package-lock.json`       | `npm ci`                                                                                                                                      |
-| `bun.lock` or `bun.lockb` | `bun install --frozen-lockfile` when Bun is on `PATH`; otherwise skip with a note                                                             |
+| Lockfile                  | Preparation                                                                                                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm-lock.yaml`          | Enable Corepack shims in a user-writable directory, without `sudo`, then `pnpm install --frozen-lockfile`                                                                                              |
+| `yarn.lock`               | Enable Corepack shims in a user-writable directory, then `yarn install --immutable` for Berry, detected from `packageManager` or `.yarnrc.yml`; otherwise `yarn install --frozen-lockfile` for Classic |
+| `package-lock.json`       | `npm ci`                                                                                                                                                                                               |
+| `bun.lock` or `bun.lockb` | `bun install --frozen-lockfile` when Bun is on `PATH`; otherwise skip with a note                                                                                                                      |
 
 No recognized lockfile means no dependency setup. Detection does not install Node or Bun.
 

@@ -153,10 +153,16 @@ describe("resolveEnvironmentRecipe", () => {
     [{ "package.json": entry('{"packageManager":"yarn@1.22.22"}') }, "--frozen-lockfile"],
     [{ "package.json": entry("malformed") }, "--frozen-lockfile"],
     [{}, "--frozen-lockfile"],
-  ])("selects the yarn generation from committed package metadata %#", async (files, flag) => {
-    const recipe = await resolve({ "yarn.lock": entry(), ...files });
-    expect(recipe.detectedInstall).toEqual(["yarn", "install", flag]);
-  });
+  ])(
+    "enables user-writable Corepack shims for the detected yarn generation %#",
+    async (files, flag) => {
+      const recipe = await resolve({ "yarn.lock": entry(), ...files });
+      expect(recipe.detectedInstall).toBe(
+        `mkdir -p "$HOME/.local/bin" && corepack enable --install-directory "$HOME/.local/bin" && PATH="$HOME/.local/bin:$PATH" yarn install ${flag}`,
+      );
+      expect(recipe.env).toEqual({ COREPACK_ENABLE_AUTO_PIN: "0" });
+    },
+  );
 
   it("selects npm ci for a package lock", async () => {
     expect((await resolve({ "package-lock.json": entry() })).detectedInstall).toEqual([
