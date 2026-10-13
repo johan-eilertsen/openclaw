@@ -44,6 +44,17 @@ export const standaloneRuntimeProcessBuildEntries = createRuntimeProcessBuildEnt
   runtimeProcessEntrypoints.serviceChildGroupAnchor,
 ]);
 
+export function getStandaloneRuntimeProcessOutputOptions(name: string) {
+  const stateReadEntry = runtimeProcessEntrypoints.stateRead.distWorkerPath.replace(/\.js$/u, "");
+  // Keep the read worker's optional handlers lazy without sharing the main runtime graph.
+  return name === stateReadEntry
+    ? {
+        codeSplitting: true,
+        chunkFileNames: "state/openclaw-state-read-[name]-[hash].mjs",
+      }
+    : { codeSplitting: false };
+}
+
 export function shouldBundleRuntimeSqliteDependency(id: string): boolean {
   return id === "kysely" || id.startsWith("kysely/");
 }

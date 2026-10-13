@@ -24,6 +24,7 @@ import { createPublicSessionCardAssetsPlugin } from "./scripts/lib/public-sessio
 import { createRuntimeDependencyOwnershipBuildPlugin } from "./scripts/lib/runtime-dependency-ownership-build-plugin.mts";
 import { runtimeProcessBuildEntries } from "./scripts/lib/runtime-process-build-entries.mts";
 import {
+  getStandaloneRuntimeProcessOutputOptions,
   sharedRuntimeProcessBuildEntries,
   shouldBundleRuntimeSqliteDependency,
   standaloneRuntimeProcessBuildEntries,
@@ -927,7 +928,7 @@ const configs: UserConfig[] = [
           alwaysBundle: (id) =>
             shouldAlwaysBundleDependency(id) || shouldBundleRuntimeSqliteDependency(id),
         },
-        outputOptions: { codeSplitting: false },
+        outputOptions: getStandaloneRuntimeProcessOutputOptions(name),
         plugins: [createStateSchemaInlinePlugin()],
       },
       false,
@@ -967,9 +968,10 @@ const configs: UserConfig[] = [
   workerDeployBuildConfig({
     "worker/sqlite-source-revision.worker": "src/worker/worker-deploy-sqlite-source-revision.ts",
   }),
-  workerDeployBuildConfig({
-    "worker/openclaw-state-read.worker": "src/worker/worker-deploy-state-read.ts",
-  }),
+  workerDeployBuildConfig(
+    { "worker/openclaw-state-read.worker": "src/worker/worker-deploy-state-read.ts" },
+    true,
+  ),
   workerDeployBuildConfig({
     "worker/worker-native-lifecycle.worker": "src/infra/worker-native-lifecycle.worker.ts",
   }),
