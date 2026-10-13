@@ -23,6 +23,7 @@ import {
 } from "./prepared-model-runtime.errors.js";
 
 const sendMock = vi.hoisted(() => vi.fn<typeof deliverOutboundPayloads>());
+// mock-isolation: Fix the external send boundary while real finalization and delivery custody run.
 vi.mock("../infra/outbound/deliver.js", () => ({
   deliverOutboundPayloads: sendMock,
   deliverOutboundPayloadsInternal: sendMock,
