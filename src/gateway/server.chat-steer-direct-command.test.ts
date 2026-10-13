@@ -396,7 +396,7 @@ it.for([
         idempotencyKey: `browser-direct-command-correction-${source}`,
         queueMode: "steer",
       });
-      expect(response.ok).toBe(true);
+      expect(response.ok, JSON.stringify(response)).toBe(true);
       const captured = capture.mock.results.find(
         (result) => result.type === "return" && result.value?.runId === runId,
       );
