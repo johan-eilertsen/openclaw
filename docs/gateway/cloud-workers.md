@@ -106,6 +106,21 @@ crabbox doctor --provider <backend> --json
 
 Read-only readiness does not prove allocation, setup, enrollment, or cleanup. Verify the complete session flow before relying on a new profile; see [Verify the profile](/gateway/cloud-workers/verify-the-profile).
 
+## Quick start
+
+With Crabbox logged in on the Gateway host, open **New Session** and pick **Cloud**
+in the where picker. OpenClaw discovers the configured backend, then saves a
+`cloud` profile when you select it. You can edit that profile later in
+**Settings → Connections → Cloud workers**. An explicitly configured direct
+provider can supply the same suggestion; discovery checks configuration, while
+allocation still performs the provider's normal preflight checks.
+
+The suggested profile uses Linux, the smallest advertised standard machine
+class, an 8-hour lifetime, a 45-minute idle timeout and idle suspend, and warm
+images. Viewing the suggestion does not save config or allocate a machine.
+Saving requires administrator access. Existing profiles take precedence, and
+adopting an existing `cloud` profile leaves it unchanged.
+
 ## Configuration
 
 Manage profiles in the Control UI under **Settings → Connections → Cloud workers**, or edit `cloudWorkers.profiles` directly in `openclaw.json` — both write the same config keys. The settings page lists each profile's backend, class, lifetime, and idle-stop in plain language, and shows whether it is advertised to `environments.list`. Saved changes apply without restarting the Gateway. With `gateway.reload.mode: "off"`, a save from this page restarts the Gateway to apply it, while direct edits to `openclaw.json` wait for a manual `openclaw gateway restart`. With no profiles configured it explains the feature, links back to this page, and starts the add flow.
