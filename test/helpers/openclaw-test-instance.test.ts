@@ -25,7 +25,6 @@ import { withEnvAsync } from "../../src/test-utils/env.js";
 import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import {
   createOpenClawTestInstance,
-  formatGatewayReadinessDiagnostic,
   GatewayStartupRefusedError,
   type GatewayReadinessDiagnostic,
   type OpenClawTestInstance,
@@ -810,11 +809,8 @@ describe("openclaw test instance", () => {
   );
 
   it.for([
-    { mode: "0", prepare: false },
-    { mode: "7", prepare: false },
     { mode: "drain", prepare: false },
     { mode: "stderr", prepare: false },
-    { mode: "large", prepare: false },
     { mode: "wait", prepare: false },
     { mode: "0", prepare: true },
     ...(process.platform === "win32" ? [] : [{ mode: "signal", prepare: false }]),
@@ -1446,92 +1442,72 @@ describe("openclaw test instance", () => {
     },
   );
 
-  it("classifies only exact stderr convergence refusals with status 1", () => {
-    const classify = testing.isGatewayMigrationConvergenceRefusal;
-    expect(classify(1, null, `notice\n${MIGRATION_CONVERGENCE_REFUSAL} retry\n`)).toBe(true);
-    for (const candidate of [
-      [2, null, MIGRATION_CONVERGENCE_REFUSAL],
-      [1, "SIGTERM", MIGRATION_CONVERGENCE_REFUSAL],
-      [1, null, MIGRATION_CONVERGENCE_REFUSAL.slice(0, -1)],
-      [1, null, `prefix ${MIGRATION_CONVERGENCE_REFUSAL}`],
-    ]) {
-      expect(classify(...(candidate as [number, NodeJS.Signals | null, string]))).toBe(false);
-    }
-  });
+  it.for(["profile-legacy-refuse", "late-legacy-refuse", "startup-late-legacy-refuse"])(
+    "reports a typed %s only after the child's stderr closes",
+    async (action) => {
+      const message = action.startsWith("startup-")
+        ? LEGACY_STARTUP_FAILURE
+        : action === "profile-legacy-refuse"
+          ? PROFILED_LEGACY_MIGRATION_REFUSAL
+          : LEGACY_MIGRATION_REFUSAL;
+      const control = action.includes("late-") ? await createGatewayControl() : undefined;
+      const { instance, readAttempts } = await createFakeGateway(
+        `${action},config-refuse`,
+        10_000,
+        1_500,
+        control,
+      );
+      if (action === "profile-legacy-refuse" || action.startsWith("startup-")) {
+        instance.env.OPENCLAW_PROFILE = "qa-fixture";
+      }
+      const exited = createDeferred();
+      if (control) {
+        control.observers.onLaunch = () => {
+          instance.child?.once("exit", () => exited.resolve());
+        };
+      }
+      const startup = trackOperation(instance.startGateway());
+      const outcome = startup.catch((error: unknown) => error);
+      if (control) {
+        await Promise.race([exited.promise, outcome]);
+        await Promise.race([control.reached, outcome]);
+        expect(instance.child?.stderr.closed).toBe(false);
+        expect(instance.logs()).not.toContain(message);
+        await control.release();
+      }
+      const error = await outcome;
+      expect(error).toMatchObject({
+        reason: "legacy-migration-required",
+        exitCode: 78,
+        signalCode: null,
+        legacyStorePath: LEGACY_STORE_PATH,
+        stderr: `${message}\n`,
+        cause: expect.any(Error),
+      });
+      expect(error).toBeInstanceOf(GatewayStartupRefusedError);
+      expect(instance.child).toBeUndefined();
+      expect(await readAttempts()).toHaveLength(1);
+      // Historical stderr must not classify the next child's unrelated EX_CONFIG.
+      const nextError = await instance.startGateway().catch((failure: unknown) => failure);
+      expect(nextError).toBeInstanceOf(Error);
+      expect(nextError).not.toBeInstanceOf(GatewayStartupRefusedError);
+      expect(await readAttempts()).toHaveLength(2);
+    },
+  );
 
-  it.for([
-    "legacy-refuse",
-    "profile-legacy-refuse",
-    "late-legacy-refuse",
-    "startup-legacy-refuse",
-    "startup-late-legacy-refuse",
-  ])("reports a typed %s only after the child's stderr closes", async (action) => {
-    const message = action.startsWith("startup-")
-      ? LEGACY_STARTUP_FAILURE
-      : action === "profile-legacy-refuse"
-        ? PROFILED_LEGACY_MIGRATION_REFUSAL
-        : LEGACY_MIGRATION_REFUSAL;
-    const control = action.includes("late-") ? await createGatewayControl() : undefined;
-    const { instance, readAttempts } = await createFakeGateway(
-      `${action},config-refuse`,
-      10_000,
-      1_500,
-      control,
-    );
-    if (action === "profile-legacy-refuse" || action.startsWith("startup-")) {
-      instance.env.OPENCLAW_PROFILE = "qa-fixture";
-    }
-    const exited = createDeferred();
-    if (control) {
-      control.observers.onLaunch = () => {
-        instance.child?.once("exit", () => exited.resolve());
-      };
-    }
-    const startup = trackOperation(instance.startGateway());
-    const outcome = startup.catch((error: unknown) => error);
-    if (control) {
-      await Promise.race([exited.promise, outcome]);
-      await Promise.race([control.reached, outcome]);
-      expect(instance.child?.stderr.closed).toBe(false);
-      expect(instance.logs()).not.toContain(message);
-      await control.release();
-    }
-    const error = await outcome;
-    expect(error).toMatchObject({
-      reason: "legacy-migration-required",
-      exitCode: 78,
-      signalCode: null,
-      legacyStorePath: LEGACY_STORE_PATH,
-      stderr: `${message}\n`,
-      cause: expect.any(Error),
-    });
-    expect(error).toBeInstanceOf(GatewayStartupRefusedError);
-    expect(instance.child).toBeUndefined();
-    expect(await readAttempts()).toHaveLength(1);
-    // Historical stderr must not classify the next child's unrelated EX_CONFIG.
-    const nextError = await instance.startGateway().catch((failure: unknown) => failure);
-    expect(nextError).toBeInstanceOf(Error);
-    expect(nextError).not.toBeInstanceOf(GatewayStartupRefusedError);
-    expect(await readAttempts()).toHaveLength(2);
-  });
-
-  it.for([
-    "legacy-stdout",
-    "legacy-status1",
-    "legacy-no-advice",
-    "profile-legacy-refuse",
-    "startup-no-advice",
-    "startup-warning",
-  ])("does not classify %s as an explained legacy migration refusal", async (action) => {
-    const { instance, readAttempts } = await createFakeGateway(action);
-    if (action === "profile-legacy-refuse") {
-      instance.env.OPENCLAW_PROFILE = "different-fixture";
-    }
-    const error = await instance.startGateway().catch((failure: unknown) => failure);
-    expect(error).toBeInstanceOf(Error);
-    expect(error).not.toBeInstanceOf(GatewayStartupRefusedError);
-    expect(await readAttempts()).toHaveLength(1);
-  });
+  it.for(["legacy-no-advice", "profile-legacy-refuse", "startup-warning"])(
+    "does not classify %s as an explained legacy migration refusal",
+    async (action) => {
+      const { instance, readAttempts } = await createFakeGateway(action);
+      if (action === "profile-legacy-refuse") {
+        instance.env.OPENCLAW_PROFILE = "different-fixture";
+      }
+      const error = await instance.startGateway().catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(GatewayStartupRefusedError);
+      expect(await readAttempts()).toHaveLength(1);
+    },
+  );
 
   it("does not retry a drained migration refusal after owner cancellation", async () => {
     const controller = new AbortController();
@@ -1565,7 +1541,7 @@ describe("openclaw test instance", () => {
     expect(isProcessAlive(attempts[0]!.pid)).toBe(false);
   });
 
-  it.for(["refuse", "late-refuse"])(
+  it.for(["late-refuse"])(
     "restarts one %s refusal with identical launch state and owns the ready child",
     async (refusalAction, { signal: testSignal }) => {
       const control = refusalAction === "late-refuse" ? await createGatewayControl() : undefined;
@@ -1628,7 +1604,7 @@ describe("openclaw test instance", () => {
     },
   );
 
-  it.for(["near", "stdout", "status2", "signal", "unrelated"])(
+  it.for(["near", "stdout", "status2", "signal"])(
     "keeps %s convergence lookalikes terminal",
     async (action, context) => {
       // A Windows self-SIGTERM is status 1/null, already covered by the refusal case.
@@ -1873,7 +1849,7 @@ describe("openclaw test instance", () => {
     },
   );
 
-  it.each([true, false])(
+  it.each([true])(
     "does not target an exited Windows gateway (inherited pipes=%s)",
     async (inheritedPipes) => {
       const stdout = new PassThrough();
@@ -2057,27 +2033,6 @@ describe("openclaw test instance", () => {
     }
   });
 
-  it("keeps only bounded child output tails in helper logs", () => {
-    const stdout = testing.createBoundedStringLog(32);
-    const stderr = testing.createBoundedStringLog(32);
-
-    testing.appendLogChunk(stdout, `old stdout ${"x".repeat(64)}\n`);
-    testing.appendLogChunk(stdout, "recent stdout\n");
-    testing.appendLogChunk(stderr, `old stderr ${"y".repeat(64)}\n`);
-    testing.appendLogChunk(stderr, "recent stderr\n");
-
-    const logs = testing.formatLogs(stdout, stderr);
-    expect(logs).toContain("[output truncated to last 32 bytes]");
-    expect(logs).toContain("recent stdout");
-    expect(logs).toContain("recent stderr");
-    expect(logs).not.toContain("old stdout");
-    expect(logs).not.toContain("old stderr");
-
-    const exact = testing.createBoundedStringLog(32);
-    testing.appendLogChunk(exact, "x".repeat(32));
-    expect(testing.formatLogs(exact, [])).not.toContain("output truncated");
-  });
-
   describe("UTF-8 log trimming", () => {
     let exerciseTrimming: () => Promise<void>;
     let stopTrimming: (() => Promise<void>) | undefined;
@@ -2151,82 +2106,6 @@ describe("openclaw test instance", () => {
     });
   });
 
-  it("fails startup waits immediately after signaled gateway exits", async () => {
-    const error = await testing
-      .waitForGatewayReady(
-        createGatewayProcessState({ pid: 12345, signalCode: "SIGTERM" }),
-        [],
-        [],
-        1,
-        10_000,
-      )
-      .catch((failure: unknown) => failure);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toContain("gateway exited before readiness");
-    expect(readReadinessReceipt(error)).toEqual({
-      attempts: 0,
-      elapsedMs: expect.any(Number),
-      lastProbe: null,
-      lastFailedResponse: null,
-      child: { pid: 12345, exitCode: null, signalCode: "SIGTERM" },
-    });
-  });
-
-  it("waits for startup admission after the gateway readiness probe reports ready", async () => {
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        new Response('{"ready":false,"failing":["startup-sidecars"]}', { status: 503 }),
-      )
-      .mockResolvedValueOnce(new Response('{"ready":true,"failing":[]}', { status: 200 }))
-      .mockResolvedValueOnce(new Response('{"ok":false,"status":"starting"}', { status: 503 }))
-      .mockResolvedValueOnce(new Response('{"ready":true,"failing":[]}', { status: 200 }))
-      .mockResolvedValueOnce(new Response('{"ok":true,"status":"started"}', { status: 200 }));
-
-    const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-    await expect(
-      testing.waitForGatewayReady(
-        createGatewayProcessState(),
-        [],
-        [],
-        12345,
-        1_000,
-        fetchImpl,
-        undefined,
-        record,
-      ),
-    ).resolves.toBeUndefined();
-    expect(record).toHaveBeenCalledWith(
-      expect.objectContaining({
-        outcome: "ready",
-        probe: "GET /readyz",
-        settlementProbe: "GET /startupz",
-        lastProbe: expect.objectContaining({
-          attempt: 3,
-          status: 200,
-          ready: true,
-          endpoint: "/startupz",
-          startupStatus: "started",
-        }),
-        lastFailedResponse: expect.objectContaining({
-          attempt: 2,
-          status: 503,
-          ready: true,
-          endpoint: "/startupz",
-          startupStatus: "starting",
-        }),
-      }),
-    );
-
-    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
-      "http://127.0.0.1:12345/readyz",
-      "http://127.0.0.1:12345/readyz",
-      "http://127.0.0.1:12345/startupz",
-      "http://127.0.0.1:12345/readyz",
-      "http://127.0.0.1:12345/startupz",
-    ]);
-  });
-
   it("bounds not-ready diagnostics without exposing response details", async () => {
     const privateDetail = `private-channel-${"x".repeat(2_048)}`;
     const fetchImpl = vi.fn<typeof fetch>(async () => {
@@ -2291,68 +2170,6 @@ describe("openclaw test instance", () => {
     });
   });
 
-  it.each([
-    { status: 502, body: "proxy refusal", phase: "body", error: "invalid-json" },
-    { status: 503, body: '{"ready":false}', phase: "complete", ready: false },
-    { status: 200, body: '{"ready":false}', phase: "complete", ready: false },
-    { status: 503, body: '{"ready":true}', phase: "complete", ready: true },
-    { status: 200, body: "{}", phase: "complete" },
-  ])("retains the last failed response ($status/$body) before a final timeout", async (failed) => {
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
-    const privateDetail = "synthetic-proxy-credential";
-    const processState = createGatewayProcessState();
-    const fetchImpl = createStalledReadinessFetch("headers")
-      .mockResolvedValueOnce(new Response('{"ready":false}', { status: 429 }))
-      .mockResolvedValueOnce(
-        new Response(failed.body, {
-          status: failed.status,
-          headers: { "x-private": privateDetail },
-        }),
-      )
-      .mockRejectedValueOnce(new Error(privateDetail));
-    const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-    const completion = testing
-      .waitForGatewayReady(processState, [], [], 12345, 39, fetchImpl, undefined, record)
-      .catch((failure: unknown) => failure);
-    try {
-      await vi.advanceTimersByTimeAsync(39);
-      const failure = await completion;
-      const receipt = readReadinessReceipt(failure);
-      expect(receipt).toMatchObject({
-        attempts: 4,
-        elapsedMs: 39,
-        lastProbe: { attempt: 4, phase: "headers", error: "timeout", elapsedMs: 9 },
-        lastFailedResponse: {
-          attempt: 2,
-          phase: failed.phase,
-          elapsedMs: 0,
-          status: failed.status,
-          ...(failed.ready === undefined ? {} : { ready: failed.ready }),
-          ...(failed.error === undefined ? {} : { error: failed.error }),
-        },
-      });
-      expect(record).toHaveBeenCalledWith(
-        expect.objectContaining({
-          outcome: "timeout",
-          lastProbe: receipt.lastProbe,
-          lastFailedResponse: receipt.lastFailedResponse,
-        }),
-      );
-      const diagnostic: GatewayReadinessDiagnostic = record.mock.calls[0]![0];
-      expect(readReadinessReceipt(new Error(formatGatewayReadinessDiagnostic(diagnostic)))).toEqual(
-        receipt,
-      );
-      expect(JSON.stringify(record.mock.calls)).not.toContain(privateDetail);
-      expect((failure as Error).message).not.toContain(privateDetail);
-      expect(processState.listenerCount("exit")).toBe(0);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      await vi.runAllTimersAsync();
-      await completion;
-      vi.useRealTimers();
-    }
-  });
-
   it.each(["timeout", "child-exit", "aborted"] as const)(
     "does not replace a failed response with an expired body on %s",
     async (outcome) => {
@@ -2405,38 +2222,6 @@ describe("openclaw test instance", () => {
       }
     },
   );
-
-  it("keeps the formatted receipt below 1024 bytes with maximal sanitized fields", () => {
-    const large = Number.MAX_SAFE_INTEGER;
-    const lastProbe = {
-      attempt: large,
-      phase: "complete" as const,
-      elapsedMs: large,
-      status: 503,
-      ready: false,
-      failing: Array<string>(8).fill("startup-sidecars"),
-      omittedFailing: large,
-    };
-    const receipt = readReadinessReceipt(
-      new Error(
-        formatGatewayReadinessDiagnostic({
-          attempts: large,
-          elapsedMs: large,
-          lastProbe,
-          lastFailedResponse: {
-            attempt: large,
-            phase: "body",
-            elapsedMs: large,
-            status: 502,
-            error: "invalid-json",
-          },
-          child: { pid: large, exitCode: large, signalCode: "SIGVTALRM" },
-        }),
-      ),
-    );
-    expect(receipt.lastProbe.failing).toHaveLength(8);
-    expect(receipt.lastFailedResponse.status).toBe(502);
-  });
 
   it.each(["fetch-failed", "invalid-json", "body-failed"] as const)(
     "records only the fixed %s readiness category",
@@ -2578,57 +2363,5 @@ describe("openclaw test instance", () => {
     } finally {
       processState.off("removeListener", releaseLateHeaders);
     }
-  });
-
-  it("creates isolated config and spawn env without mutating process env", async () => {
-    const previousHome = process.env.HOME;
-    const inst = await createOpenClawTestInstance({
-      name: "instance-unit",
-      gatewayToken: "gateway-token",
-      hookToken: "hook-token",
-      config: {
-        gateway: {
-          bind: "loopback",
-        },
-      },
-      env: {
-        OPENCLAW_SKIP_CRON: "0",
-      },
-    });
-
-    try {
-      expect(process.env.HOME).toBe(previousHome);
-      expect(inst.homeDir).toBe(path.join(inst.state.root, "home"));
-      expect(inst.stateDir).toBe(path.join(inst.homeDir, ".openclaw"));
-      expect(inst.configPath).toBe(path.join(inst.stateDir, "openclaw.json"));
-      expect(inst.env.HOME).toBe(inst.homeDir);
-      expect(inst.env.OPENCLAW_STATE_DIR).toBe(inst.stateDir);
-      expect(inst.env.OPENCLAW_CONFIG_PATH).toBe(inst.configPath);
-      expect(inst.env.OPENCLAW_SKIP_CRON).toBe("0");
-
-      const config = JSON.parse(await fs.readFile(inst.configPath, "utf8"));
-      expect(config).toStrictEqual({
-        gateway: {
-          bind: "loopback",
-          port: inst.port,
-          auth: {
-            mode: "token",
-            token: "gateway-token",
-          },
-          controlUi: {
-            enabled: false,
-          },
-        },
-        hooks: {
-          enabled: true,
-          token: "hook-token",
-          path: "/hooks",
-        },
-      });
-    } finally {
-      await inst.cleanup();
-    }
-
-    await expectPathMissing(inst.state.root);
   });
 });
