@@ -154,7 +154,7 @@ When metadata is needed, preparation reads the machine-owned bundled-discovery p
 
 Promise-only metadata preparation retains one read-only child for snapshot allocation, copying, and retirement. The shared-state worker reads the private bytes; no staging worker or spawn broker starts for that preparation. Existing prepared snapshots are reused, and source files remain unchanged.
 
-It reuses a running shared-state reader when available. Cold promise-only reads start a direct worker through that same owner, without a native-lifetime supervisor thread. Readers that need synchronous servicing retain their transport and cleanup contract.
+It reuses a running shared-state reader when available. Cold promise-only reads start a direct worker through that same owner, without a native-lifetime supervisor thread, and join its exit before loading manifests. Readers that need synchronous servicing retain their transport and cleanup contract.
 
 Channel setup catalogs retain the requested workspace and load-path scope, including raw plugin shadows, so trust filtering can select the appropriate installed alternative.
 

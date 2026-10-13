@@ -311,6 +311,7 @@ function createReadTransport(
     const inContext = AsyncLocalStorage.snapshot();
     let task: ReadTask | undefined;
     let releaseAdmission: (() => void) | undefined;
+    let retireAfterRead = false;
     const cleanup = { retire: true };
     const completion = createRetainedOperation<OpenClawStateReadOutcome>(() => inContext(service));
     function service() {
@@ -328,7 +329,7 @@ function createReadTransport(
           throw read.error;
         }
         const reply = read.value;
-        cleanup.retire = Boolean(reply.nativeCleanupFailure);
+        cleanup.retire = retireAfterRead || Boolean(reply.nativeCleanupFailure);
         if (reply.ok) {
           outcome = { value: reply };
         } else {
@@ -365,8 +366,11 @@ function createReadTransport(
         snapshotRoot,
         command: { ...readCommand },
       };
+      const pool = readPool(state, ownsAdmission(), awaitedOnly);
+      // Keep admission and its read together, then release the cold isolate before metadata loads.
+      retireAfterRead = !pool.retained && readCommand.type !== "admit";
       task = startReadTask(
-        readPool(state, ownsAdmission(), awaitedOnly),
+        pool,
         () => {
           const turn = acquireSqliteDatabaseAdmissionTurn(location);
           if (!turn) {
