@@ -1,7 +1,7 @@
 // Exercises ordered provider faults through the embedded runner failover boundary.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTextToolResult } from "../../test/helpers/text-tool-result.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ContextEngine } from "../context-engine/types.js";
@@ -70,6 +70,8 @@ vi.mock("./models-config.js", async () => {
 
 type ProductionRunEmbeddedAgent = typeof import("./embedded-agent-runner/run.js").runEmbeddedAgent;
 let runEmbeddedAgentWithPreparedAdmission: ProductionRunEmbeddedAgent;
+let setRuntimeConfigSnapshot: typeof import("../config/runtime-snapshot.js").setRuntimeConfigSnapshot;
+let clearRuntimeConfigSnapshot: typeof import("../config/runtime-snapshot.js").clearRuntimeConfigSnapshot;
 let runWithModelFallback: typeof import("./model-fallback-runner.js").runWithModelFallback;
 let captureRoutingDecisionWork: typeof import("./test-helpers/model-routing-decision-e2e-fixtures.js").captureRoutingDecisionWork;
 let createModelRoutingTestAdmission: typeof import("./test-helpers/model-routing-decision-e2e-fixtures.js").createModelRoutingTestAdmission;
@@ -78,6 +80,8 @@ let saveAuthProfileStore: typeof import("./auth-profiles/store-runtime.js").save
 
 beforeAll(async () => {
   vi.resetModules();
+  ({ setRuntimeConfigSnapshot, clearRuntimeConfigSnapshot } =
+    await import("../config/runtime-snapshot.js"));
   installEmbeddedRunnerBaseE2eMocks();
   installEmbeddedRunnerFastRunE2eMocks({
     runEmbeddedAttempt: (params) => runEmbeddedAttemptMock(params),
@@ -104,6 +108,8 @@ beforeEach(() => {
   runEmbeddedAttemptMock.mockReset();
   sleepWithAbortMock.mockClear();
 });
+
+afterEach(() => clearRuntimeConfigSnapshot());
 
 function makeProviderConfig(fallbacks: string[]): OpenClawConfig {
   const provider = (modelIds: string[]) => ({
@@ -290,6 +296,8 @@ async function runScenario(params: {
   config: OpenClawConfig;
   runId: string;
 }): Promise<ScenarioOutcome> {
+  // Direct runner fixtures publish the config normally prepared by Gateway startup.
+  setRuntimeConfigSnapshot(params.config);
   const { replaceSessionEntry } = await import("../config/sessions/session-accessor.js");
   const sessionTarget = {
     agentId: "test",
@@ -399,6 +407,7 @@ async function expectPreparationInvalidationToDropRoutingWork(
     const runId = `route-preparation-${mode}`;
     const config = makeProviderConfig([]);
     const auditConfig = { ...config, logging: { audit: { executionIdentity: true } } };
+    setRuntimeConfigSnapshot(auditConfig);
     writeProfiles(agentDir, { openai: 1 });
     runEmbeddedAttemptMock.mockResolvedValue(
       makeEmbeddedRunnerAttempt({
@@ -676,15 +685,22 @@ describe("runEmbeddedAgent provider fault sequences", () => {
         }),
       );
 
-      // Current behavior: legacy compaction reports no compactable transcript, so the runner
-      // returns a blocked context_overflow payload instead of rotating credentials or models.
+      // With no compactable transcript or fallback model, keep the blocked payload
+      // and record the exhausted candidate without rotating credentials.
       expect(observations).toHaveLength(1);
       expect(outcome.result.meta.error).toMatchObject({ kind: "context_overflow" });
       expect(outcome.result.payloads?.[0]).toMatchObject({
         isError: true,
         text: expect.stringContaining("Context overflow: prompt too large for the model"),
       });
-      expect(outcome.attempts).toEqual([]);
+      expect(outcome.attempts).toEqual([
+        expect.objectContaining({
+          provider: "openai",
+          model: "mock-1",
+          reason: "context_overflow",
+          error: "Prompt is too long for this model's context window",
+        }),
+      ]);
       const usageStats = await readUsageStats(agentDir);
       expect(usageStats["openai:p1"]?.cooldownUntil).toBeUndefined();
     });
