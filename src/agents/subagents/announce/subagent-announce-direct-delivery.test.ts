@@ -463,7 +463,7 @@ describe("late exact requester recovery", () => {
     const result = await delivery;
     expect(result.delivered).toBe(outcome.delivered);
     expect(result.disposition).toBe(outcome.disposition);
-    if ("error" in outcome) {
+    if ("error" in outcome && outcome.error) {
       expect(onDeliveryError).toHaveBeenCalledWith(outcome.error);
       expect(result.error).toBe(outcome.error.message);
     } else {
