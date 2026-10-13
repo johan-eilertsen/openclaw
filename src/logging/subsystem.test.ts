@@ -491,14 +491,13 @@ describe("createSubsystemLogger().isEnabled", () => {
         code: "CUSTODY_ENDED",
         syscall: "synthetic-settle",
         requestId: "synthetic-request",
+        request: { body: "synthetic private completion" },
+        config: { data: "synthetic private tool input" },
         stack:
           "Error: Pending input ownership ended\n    at settle (fixture.ts:1:1)\n    at wake (fixture.ts:2:1)\n    at complete (fixture.ts:3:1)\n    at parent (fixture.ts:4:1)\n    at lifecycle (fixture.ts:5:1)\n    at omitted (fixture.ts:6:1)",
       });
       const expectedError = {
         name: "SessionPendingInputCustodyError",
-        code: "CUSTODY_ENDED",
-        syscall: "synthetic-settle",
-        requestId: "synthetic-request",
         message: "Pending input ownership ended",
         errorCode: "CUSTODY_ENDED",
         stack: failure.stack.split("\n").slice(0, 6).join("\n"),
@@ -511,9 +510,12 @@ describe("createSubsystemLogger().isEnabled", () => {
       await testApi.flushFileLogQueueForTests();
 
       const record = JSON.parse(fs.readFileSync(file, "utf8").trim());
-      expect(record["1"]).toEqual({ err: expectedError, runId: "synthetic-child" });
+      expect(record["1"]).toEqual({
+        err: { ...expectedError, stack: failure.stack },
+        runId: "synthetic-child",
+      });
       const consoleLine = String(mockCall(warn)[0]);
-      const consoleError = { ...expectedError, code: "***" };
+      const consoleError = expectedError;
       if (consoleStyle === "json") {
         expect(JSON.parse(consoleLine)).toMatchObject({
           err: consoleError,
@@ -527,6 +529,8 @@ describe("createSubsystemLogger().isEnabled", () => {
         expect(consoleLine).toContain("runId=synthetic-child");
       }
       expect(consoleLine).not.toContain("omitted");
+      expect(fs.readFileSync(file, "utf8")).not.toContain("synthetic private");
+      expect(consoleLine).not.toContain("synthetic private");
       expect(failure.stack).toContain("omitted");
     },
   );

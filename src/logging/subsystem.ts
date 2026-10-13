@@ -282,17 +282,20 @@ function formatConsoleMetaValue(value: unknown): string | undefined {
 }
 
 /** Preserve native error diagnostics before any sink reduces non-enumerable fields to `{}`. */
-function prepareLogMetaRecord(meta: Record<string, unknown>): Record<string, unknown> {
+function prepareLogMetaRecord(
+  meta: Record<string, unknown>,
+  stackHeadOnly = false,
+): Record<string, unknown> {
   let prepared: Record<string, unknown> | undefined;
   for (const [key, value] of Object.entries(meta)) {
     if (value instanceof Error) {
       prepared ??= { ...meta };
-      prepared[key] = Object.assign({}, value, {
+      prepared[key] = {
         name: value.name,
         message: value.message,
         errorCode: extractErrorCode(value),
-        stack: value.stack?.split("\n").slice(0, 6).join("\n"),
-      });
+        stack: stackHeadOnly ? value.stack?.split("\n").slice(0, 6).join("\n") : value.stack,
+      };
     }
   }
   return prepared ?? meta;
@@ -388,6 +391,7 @@ export function createSubsystemLogger(subsystem: string): SubsystemLogger {
     }
     let consoleMessageOverride: string | undefined;
     let fileMeta = meta;
+    let consoleFields = meta;
     if (meta && Object.keys(meta).length > 0) {
       const { consoleMessage, ...rest } = meta as Record<string, unknown> & {
         consoleMessage?: unknown;
@@ -396,6 +400,7 @@ export function createSubsystemLogger(subsystem: string): SubsystemLogger {
         consoleMessageOverride = consoleMessage;
       }
       fileMeta = Object.keys(rest).length > 0 ? prepareLogMetaRecord(rest) : undefined;
+      consoleFields = fileMeta && consoleEnabled ? prepareLogMetaRecord(rest, true) : undefined;
     }
     if (fileEnabled) {
       logToFile(getFileLogger(level), level, message, fileMeta);
@@ -409,9 +414,9 @@ export function createSubsystemLogger(subsystem: string): SubsystemLogger {
     const consoleMeta =
       consoleSettings.style !== "json" &&
       consoleMessageOverride === undefined &&
-      fileMeta &&
+      consoleFields &&
       CONSOLE_META_LEVELS.has(level)
-        ? formatConsoleMeta(fileMeta)
+        ? formatConsoleMeta(consoleFields)
         : "";
     const consoleMessage =
       consoleMessageOverride ?? (consoleMeta ? `${message} ${consoleMeta}` : message);
@@ -420,7 +425,7 @@ export function createSubsystemLogger(subsystem: string): SubsystemLogger {
         level,
         suppressProbeMessages,
         message: consoleMessage,
-        meta: fileMeta,
+        meta: consoleFields,
       })
     ) {
       return;
@@ -428,7 +433,12 @@ export function createSubsystemLogger(subsystem: string): SubsystemLogger {
     writeConsoleLine(
       level,
       consoleSettings.style === "json"
-        ? formatJsonConsoleLine({ level, subsystem: resolvedSubsystem, message, meta: fileMeta })
+        ? formatJsonConsoleLine({
+            level,
+            subsystem: resolvedSubsystem,
+            message,
+            meta: consoleFields,
+          })
         : (formatConsoleLine ??= createConsoleLineFormatter(resolvedSubsystem))(
             level,
             consoleMessage,

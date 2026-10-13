@@ -265,7 +265,8 @@ timeout. Those events do not automatically cancel them.
 - Recursive spawning is enabled through depth `5` by default. Set `maxSpawnDepth` from `1` through `5` to lower the boundary.
 - `maxChildrenPerAgent` caps active children per session (default `5`, range `1-20`).
 
-Subagent lifecycle warnings retain the error name, message, code, and first stack
-frames in structured logs. Direct announce and requester-settle retry warnings
+Subagent lifecycle warnings retain the error name, message, code, and full stack
+in file logs; console output includes the first six stack lines. Direct announce
+and requester-settle retry warnings
 also include the requester and delivery idempotency key so retries can be traced
 without logging message content.

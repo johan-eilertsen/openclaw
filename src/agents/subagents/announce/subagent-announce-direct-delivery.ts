@@ -319,6 +319,7 @@ async function sendSubagentAnnounceDirectlyBound(
         agentResult,
         signal: params.signal,
         onDeliveryResult: params.onDeliveryResult,
+        onDeliveryError: params.onDeliveryError,
         isSourceSessionEffectsAllowed: isCompletionDeliveryAllowed,
       });
     // A private settle turn never delivers; automatic only keeps a tool-only mode from
