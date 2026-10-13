@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { build } from "tsdown";
 import { describe, expect, it } from "vitest";
@@ -10,6 +12,30 @@ const { createTempDir } = createScriptTestHarness();
 const handlersModule = "/src/state/openclaw-state-read-handlers.ts";
 
 describe("state read worker artifacts", () => {
+  it("preserves installed native and asset locations when filesystem helpers are bundled", () => {
+    const require = createRequire(import.meta.url);
+    const packageRoot = path.dirname(require.resolve("@openclaw/fs-safe/package.json"));
+    const root = fs.realpathSync(createTempDir("openclaw-reader-dependency-build-"));
+    // The native dependency and its build run in the shipped reader's process boundary.
+    const result = execFileSync(
+      process.execPath,
+      [
+        "--import",
+        path.resolve("scripts/tsx.mjs"),
+        path.resolve("test/scripts/state-read-worker-dependency.test-support.mts"),
+        root,
+      ],
+      { encoding: "utf8" },
+    );
+    const observed = JSON.parse(result) as {
+      helper: string;
+      bundledNative: boolean;
+      originalNative: boolean;
+    };
+    expect(observed.helper).toBe(path.join(packageRoot, "dist/windows-security-helper.exe"));
+    expect(observed.bundledNative).toBe(observed.originalNative);
+  });
+
   it.each([
     ["state/openclaw-state-read.worker", ".js", handlersModule],
     ["worker/openclaw-state-read.worker", ".mjs", handlersModule],

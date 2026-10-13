@@ -12,6 +12,7 @@ import {
 } from "./scripts/lib/bundled-plugin-build-entries.mjs";
 import { createGatewayRunChunkMetadataPlugin } from "./scripts/lib/gateway-run-chunk-metadata.mts";
 import { createManagedHandoffBuildConfigs } from "./scripts/lib/managed-handoff-build-config.mts";
+import { createPackageRuntimeUrlBuildPlugin } from "./scripts/lib/package-runtime-url-build-plugin.mts";
 import { createPluginInventoryModuleRefsPlugin } from "./scripts/lib/plugin-inventory-module-refs.mts";
 import {
   buildPluginSdkEntrySources,
@@ -119,7 +120,7 @@ function matchesExternalOption(
 
 function buildInputOptions(
   options: InputOptionsArg,
-  build?: { bundleAllDependencies?: boolean },
+  build?: { bundleAllDependencies?: boolean; bundleFsSafe?: boolean },
 ): Awaited<InputOptionsReturn> {
   if (process.env.OPENCLAW_BUILD_VERBOSE === "1") {
     return undefined;
@@ -160,7 +161,12 @@ function buildInputOptions(
     ...options,
     external(id: string, parentId: string | undefined, isResolved: boolean) {
       return (
-        (!build?.bundleAllDependencies && shouldNeverBundleDependency(id)) ||
+        (!build?.bundleAllDependencies &&
+          !(
+            build?.bundleFsSafe &&
+            (id === "@openclaw/fs-safe" || id.startsWith("@openclaw/fs-safe/"))
+          ) &&
+          shouldNeverBundleDependency(id)) ||
         matchesExternalOption(previousExternal, id, parentId, isResolved)
       );
     },
@@ -220,6 +226,7 @@ function createBashParserAssetsPlugin(): TsdownPlugin {
 function nodeBuildConfig(
   config: UserConfig,
   declarations: UserConfig["dts"] = TSDOWN_DECLARATIONS,
+  build?: Parameters<typeof buildInputOptions>[1],
 ): UserConfig {
   return {
     ...config,
@@ -241,7 +248,7 @@ function nodeBuildConfig(
     outExtensions: () => ({ js: ".js", dts: ".d.ts" }),
     fixedExtension: false,
     sourcemap: OUTPUT_SOURCE_MAPS,
-    inputOptions: (options) => buildInputOptions(options),
+    inputOptions: (options) => buildInputOptions(options, build),
   };
 }
 
@@ -918,22 +925,37 @@ const configs: UserConfig[] = [
       false,
     );
   }),
-  ...Object.entries(standaloneRuntimeProcessBuildEntries).map(([name, source]) =>
-    nodeBuildConfig(
+  ...Object.entries(standaloneRuntimeProcessBuildEntries).map(([name, source]) => {
+    const bundleFsSafe = [
+      "infra/sqlite-readonly-location.worker",
+      "state/openclaw-state-read.worker",
+    ].includes(name);
+    const isFsSafe = (id: string) =>
+      id === "@openclaw/fs-safe" || id.startsWith("@openclaw/fs-safe/");
+    return nodeBuildConfig(
       {
         name: TSDOWN_UNIFIED_CONFIG_GROUP,
         entry: { [name]: source },
         deps: {
           ...unifiedDeps,
+          neverBundle: bundleFsSafe
+            ? (id) => shouldNeverBundleDependency(id) && !isFsSafe(id)
+            : unifiedDeps.neverBundle,
           alwaysBundle: (id) =>
-            shouldAlwaysBundleDependency(id) || shouldBundleRuntimeSqliteDependency(id),
+            shouldAlwaysBundleDependency(id) ||
+            shouldBundleRuntimeSqliteDependency(id) ||
+            (bundleFsSafe && isFsSafe(id)),
         },
         outputOptions: getStandaloneRuntimeProcessOutputOptions(name),
-        plugins: [createStateSchemaInlinePlugin()],
+        plugins: [
+          createStateSchemaInlinePlugin(),
+          ...(bundleFsSafe ? [createPackageRuntimeUrlBuildPlugin("@openclaw/fs-safe")] : []),
+        ],
       },
       false,
-    ),
-  ),
+      { bundleFsSafe },
+    );
+  }),
   nodeBuildConfig(
     {
       name: TSDOWN_UNIFIED_CONFIG_GROUP,
