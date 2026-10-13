@@ -264,6 +264,19 @@ file log levels.
 
 ### Provider request failures
 
+Model transport failures emit `Model request failed` at warning level with the
+provider, model, available status, code, type, message, error body, and request
+and response IDs. File logs preserve these error fields before transcript
+redaction and clipping; generated response content and request payloads are not
+included. Treat these local logs as sensitive. Log exports retain their existing
+redaction policy.
+
+Embedded attempts also log `Assistant attempt failed`, including the saved error
+fields, before choosing recovery. Request validation and content-policy failures
+stop unchanged model retries and fallback. Context limits use the existing
+compaction recovery. Retired transcript input is terminal: changing models cannot
+restore its admission, and the original rejection remains visible in diagnostics.
+
 Anthropic-compatible HTTP failures preserve the HTTP status separately from a
 bounded, redacted response body. JSON error bodies are parsed before diagnostic
 redaction and preview truncation, so a long proxy error does not lose its status
@@ -777,7 +790,7 @@ Nested durations overlap their parent phases; do not add them to the parent tota
 Set `OPENCLAW_GATEWAY_STARTUP_TRACE=1` for the complete breakdown and per-plugin
 import and registration timings.
 
-Desktop permission narrowing and canonical session checks remain on their required
+Desktop permission narrowing and session identity checks remain on their required
 admission paths. Transcript projection repair, orphan settlement, channel
 maintenance, pairing diagnostics, and restored-subagent activation run after
 readiness. Retired plugin captures join the existing post-ready idle cleanup.
@@ -968,12 +981,12 @@ The object aggregates observations across the pruning pass:
   calls and their requested page counts. Requested pages are not confirmed
   reclaimed pages.
 - `queryMs` covers existing archive-presence, candidate, unpublished-name, and
-  freelist reads. `rowDeletionMs` covers the canonical archive row-deletion
+  freelist reads. `rowDeletionMs` covers the archive row-deletion
   transaction.
 - `fileRemovalMs`, `removedFiles`, `missingFiles`, and `failedRemovals` report
-  existing file-removal outcomes. `removedFiles` counts successful canonical and
-  legacy removals. `missingFiles` counts canonical removal attempts that return
-  `ENOENT`. Other canonical failures and all unsuccessful legacy removals count
+  existing file-removal outcomes. `removedFiles` counts successful current-layout and
+  legacy removals. `missingFiles` counts current-layout removal attempts that return
+  `ENOENT`. Other current-layout failures and all unsuccessful legacy removals count
   under `failedRemovals`; the legacy count includes missing paths, non-files,
   and stat or removal failures.
 - `measurementMs` and `measurements` cover awaited disk-usage measurement attempts,

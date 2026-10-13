@@ -2800,6 +2800,17 @@ export const en: TranslationMap & {
     cloudWorkerFailed: "Runner failed: {error}",
     errorDetails: "Error details",
     errorReplySummary: "Couldn't finish this reply. Check the conversation before trying again.",
+    recovery: {
+      retrying: "Retrying…",
+      retryingIn: "Retrying in {seconds}s",
+      tryingFallback: "Trying fallback model…",
+      failedTitle: "Unable to finish this reply",
+      failedHelp: "Automatic recovery has stopped. Check any completed work before trying again.",
+      tryAgain: "Try again",
+      changeModel: "Change model",
+      continuePrompt:
+        "Continue from where you stopped. Check which actions already completed before retrying anything.",
+    },
     errorBusySummary: "OpenClaw is busy. Check status before trying again.",
     errorSignInSummary: "Couldn't sign in to the AI service. Sign in again under Models.",
     errorStartSummary: "Couldn't start this conversation. Open Settings → Logs for details.",
@@ -3077,7 +3088,6 @@ export const en: TranslationMap & {
       renameInputPlaceholder: "Session title",
       openParent: "Open parent session {title}",
       subagentsRunning: "Subagents · {count} running",
-      panels: "Panels",
       layout: "Layout",
       continueInTerminal: {
         action: "Continue in terminal…",
@@ -3977,6 +3987,40 @@ export const en: TranslationMap & {
       modelLockedLabel: "Model selection controlled for this session",
       lockedSessionModel: "Session model",
       thinkingLevel: "Chat thinking level",
+    },
+    permissions: {
+      title: "Grant {permissions}",
+      neededOn: "OpenClaw needs access on {node} to continue this action.",
+      openApp:
+        "Grant access in the OpenClaw Mac app on that device: Settings → This Mac → Permissions. Then tell the agent to try again.",
+      ready: "Access is available. You can ask the agent to try again.",
+      grant: "Grant {permissions}",
+      relaunch: "Relaunch OpenClaw",
+      tryAgain: "Try again",
+      retryMessage: "I granted {permissions}, try again.",
+      states: {
+        "not-determined": "Choose Grant to review the permission request.",
+        denied: "Choose Grant to open System Settings and allow access for OpenClaw.",
+        "restart-required":
+          "If you enabled access in System Settings, relaunch OpenClaw to make it available.",
+        "stale-grant":
+          "macOS may be using a stale permission grant. Choose Grant to review it in System Settings.",
+        "disabled-in-openclaw": "Choose Grant to review and enable this capability in OpenClaw.",
+      },
+      capabilities: {
+        notifications: "Notifications",
+        accessibility: "Accessibility",
+        eventPosting: "Event Posting",
+        screenRecording: "Screen Recording",
+        microphone: "Microphone",
+        speechRecognition: "Speech Recognition",
+        camera: "Camera",
+        cameraEnabled: "Camera in OpenClaw",
+        location: "Location",
+        computerControl: "Computer Control",
+        canvas: "Canvas",
+        automation: "Automation",
+      },
     },
     toolCards: {
       tool: "Tool",
