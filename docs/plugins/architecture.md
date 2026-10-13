@@ -154,6 +154,8 @@ When metadata is needed, preparation reads the machine-owned bundled-discovery p
 
 Promise-only metadata preparation retains one read-only child for snapshot allocation, copying, and retirement. The shared-state worker reads the private bytes; no staging worker or spawn broker starts for that preparation. Existing prepared snapshots are reused, and source files remain unchanged.
 
+It reuses a running shared-state reader when available. Cold promise-only reads start a direct worker through that same owner, without a native-lifetime supervisor thread. Readers that need synchronous servicing retain their transport and cleanup contract.
+
 Channel setup catalogs retain the requested workspace and load-path scope, including raw plugin shadows, so trust filtering can select the appropriate installed alternative.
 
 After startup, runtime readers reuse that inventory without filesystem discovery, manifest rereads, or freshness checks. Narrow plugin selections are in-memory views of the same inventory. Changing an account or an agent's run workspace does not invalidate it. Explicit plugin lifecycle operations prepare a new inventory for installs, updates, removals, source or manifest edits, and discovery-root changes before publishing it to the running Gateway.

@@ -97,7 +97,7 @@ export function startOpenClawStateReadOperation(
   let releasePreparedSource: (() => void) | undefined;
   let expectedIdentity: string | undefined;
   let expectedSourceIdentity: DatabaseFileIdentity | undefined;
-  let awaitedOnly = false;
+  let awaitedOnly = selection.snapshotPreparation === "awaited";
   let producerSettled = false;
   let value: ReadResult;
   const errors: unknown[] = [];
@@ -447,7 +447,12 @@ export function startOpenClawStateReadOperation(
 
   try {
     source = captureOpenClawStateReadSource();
-    transport = source.createTransport(command, selection.onChunk, selection.onChunkAsync);
+    transport = source.createTransport(
+      command,
+      selection.onChunk,
+      selection.onChunkAsync,
+      awaitedOnly,
+    );
     unregister = registerOpenClawStateDatabaseAsyncResource({
       async close(identity) {
         if (
