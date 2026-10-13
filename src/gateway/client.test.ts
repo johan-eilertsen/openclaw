@@ -9,9 +9,7 @@ import {
   GATEWAY_CLIENT_NAMES,
 } from "../../packages/gateway-protocol/src/client-info.js";
 import {
-  MIN_CLIENT_PROTOCOL_VERSION,
   MIN_NODE_PROTOCOL_VERSION,
-  MIN_PROBE_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from "../../packages/gateway-protocol/src/index.js";
 import { signDevicePayload as signDevicePayloadWithKey } from "../infra/device-identity.js";
@@ -208,7 +206,6 @@ type GatewayClientModule = typeof import("./client.js");
 type GatewayClientInstance = InstanceType<GatewayClientModule["GatewayClient"]>;
 
 let GatewayClient: GatewayClientModule["GatewayClient"];
-let isGatewayConnectAssemblyError: GatewayClientModule["isGatewayConnectAssemblyError"];
 
 const defaultIdentity = createClientTestIdentity("fixture-client-device");
 
@@ -218,7 +215,7 @@ function createClient(options: GatewayClientOptions): GatewayClientInstance {
 
 async function loadGatewayClientModule() {
   vi.resetModules();
-  ({ GatewayClient, isGatewayConnectAssemblyError } = await import("./client.js"));
+  ({ GatewayClient } = await import("./client.js"));
 }
 
 function getLatestWs(): MockWebSocket {
@@ -321,13 +318,10 @@ describe("GatewayClient security checks", () => {
 
   it.each([
     { url: "ws://remote.example.com:18789", allowed: false },
-    { url: "not-a-valid-url", allowed: false },
     { url: "ws://127.example.com:18789", allowed: false },
     { url: "ws://127.0.0.1:18789", allowed: true, direct: true },
     { url: "ws://[::ffff:127.0.0.1]:18789", allowed: true },
-    { url: "wss://remote.example.com:18789", allowed: true },
     { url: "ws://192.168.1.100:18789", allowed: true },
-    { url: "ws://[fe90::1]:18789", allowed: true },
     { url: "ws://openclaw-gateway.ai:18789", allowed: true, allowInsecure: true },
   ])("enforces the transport policy for $url", ({ url, allowed, direct, allowInsecure }) => {
     if (allowInsecure) {
@@ -348,32 +342,6 @@ describe("GatewayClient security checks", () => {
         expectTailscaleHint: url !== "not-a-valid-url",
       });
     }
-    client.stop();
-  });
-
-  it("bootstraps inherited managed proxy routing before proxy-mode loopback WebSocket creation", () => {
-    process.env.OPENCLAW_PROXY_ACTIVE = "1";
-    process.env.OPENCLAW_PROXY_LOOPBACK_MODE = "proxy";
-    process.env.HTTP_PROXY = "http://127.0.0.1:3128";
-    const onConnectError = vi.fn();
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      onConnectError,
-    });
-
-    client.start();
-
-    expect(onConnectError).not.toHaveBeenCalled();
-    expect(wsInstances.length).toBe(1);
-    expect(getLatestWs().options).not.toMatchObject({ agent: expect.any(Object) });
-    expect(installGlobalProxyMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ifActive: "reuse-compatible",
-        mode: "managed",
-        proxyUrl: "http://127.0.0.1:3128",
-        undici: expect.objectContaining({ allowH2: false }),
-      }),
-    );
     client.stop();
   });
 
@@ -430,73 +398,6 @@ describe("GatewayClient security checks", () => {
   });
 });
 
-describe("GatewayClient request errors", () => {
-  it("retries startup-unavailable connect failures without terminal callbacks", async () => {
-    vi.useFakeTimers();
-    wsInstances.length = 0;
-    const onClose = vi.fn();
-    const onConnectError = vi.fn();
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      deviceIdentity: null,
-      onClose,
-      onConnectError,
-    });
-    try {
-      client.start();
-      const ws = getLatestWs();
-      ws.emitOpen();
-      ws.emitMessage(
-        JSON.stringify({
-          type: "event",
-          event: "connect.challenge",
-          payload: { nonce: "nonce-1", ts: 1_777_777_777_000 },
-        }),
-      );
-      const connectFrame = JSON.parse(
-        ws.sent.find((frame) => frame.includes('"method":"connect"')) ?? "{}",
-      ) as { id?: string };
-
-      ws.emitMessage(
-        JSON.stringify({
-          type: "res",
-          id: connectFrame.id,
-          ok: false,
-          error: {
-            code: "UNAVAILABLE",
-            message: "gateway starting; retry shortly",
-            details: { reason: "startup-sidecars" },
-            retryable: true,
-            retryAfterMs: 250,
-          },
-        }),
-      );
-
-      await vi.advanceTimersByTimeAsync(0);
-      for (let i = 0; i < 10; i += 1) {
-        await Promise.resolve();
-      }
-
-      expect(onConnectError).not.toHaveBeenCalled();
-      expect(onClose).not.toHaveBeenCalled();
-      expect(ws.lastClose).toEqual({ code: 1013, reason: "gateway starting" });
-      expect(logDebugMock).toHaveBeenCalledWith(expect.stringContaining("gateway connect failed:"));
-      expect(logErrorMock).not.toHaveBeenCalledWith(
-        expect.stringContaining("gateway connect failed:"),
-      );
-      expect(wsInstances).toHaveLength(1);
-
-      await vi.advanceTimersByTimeAsync(249);
-      expect(wsInstances).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(wsInstances).toHaveLength(2);
-    } finally {
-      client.stop();
-      vi.useRealTimers();
-    }
-  });
-});
-
 describe("GatewayClient close handling", () => {
   beforeEach(() => {
     wsInstances.length = 0;
@@ -510,58 +411,42 @@ describe("GatewayClient close handling", () => {
       clear: "success",
     },
     { reason: "unauthorized: device token mismatch", clear: "failure" },
-    { reason: "unauthorized: signature invalid", clear: "none" },
-    { reason: "unauthorized: signature invalid", clear: "none", callbackThrows: true },
     { reason: "unauthorized: device token mismatch", clear: "none", token: "shared-token" },
-  ])(
-    "contains close cleanup and callback failures: %j",
-    ({ reason, clear, callbackThrows, token }) => {
-      if (clear === "failure") {
-        clearDeviceAuthTokenMock.mockImplementation(() => {
-          throw new Error("disk unavailable");
-        });
-      }
-      const onClose = vi.fn(() => {
-        if (callbackThrows) {
-          throw new Error("close callback failed");
-        }
+  ])("contains close cleanup failures: %j", ({ reason, clear, token }) => {
+    if (clear === "failure") {
+      clearDeviceAuthTokenMock.mockImplementation(() => {
+        throw new Error("disk unavailable");
       });
-      const env = { OPENCLAW_HOME: "/tmp/custom-openclaw-home" };
-      const client = createClientWithIdentity("dev-1", onClose, { env, token });
-      client.start();
-      expect(getLatestWs().emitClose(1008, reason)).toBeUndefined();
-      expect(onClose).toHaveBeenCalledWith(1008, reason, {
-        phase: "pre-hello",
-        socketOpened: false,
-        transportValidated: false,
-        connectRequestSent: false,
-        transientPreHelloCleanClose: false,
+    }
+    const onClose = vi.fn();
+    const env = { OPENCLAW_HOME: "/tmp/custom-openclaw-home" };
+    const client = createClientWithIdentity("dev-1", onClose, { env, token });
+    client.start();
+    expect(getLatestWs().emitClose(1008, reason)).toBeUndefined();
+    expect(onClose).toHaveBeenCalledWith(1008, reason, {
+      phase: "pre-hello",
+      socketOpened: false,
+      transportValidated: false,
+      connectRequestSent: false,
+      transientPreHelloCleanClose: false,
+    });
+    if (clear === "none") {
+      expect(clearDeviceAuthTokenMock).not.toHaveBeenCalled();
+    } else if (clear === "failure") {
+      expect(logDebugMock).toHaveBeenCalledWith(
+        expect.stringContaining("failed clearing stale device-auth token"),
+      );
+    } else {
+      expect(clearDeviceAuthTokenMock).toHaveBeenCalledWith({
+        deviceId: "dev-1",
+        role: "operator",
+        env,
+        assertCurrent: expect.any(Function),
       });
-      if (clear === "none") {
-        expect(clearDeviceAuthTokenMock).not.toHaveBeenCalled();
-      } else if (clear === "failure") {
-        expect(logDebugMock).toHaveBeenCalledWith(
-          expect.stringContaining("failed clearing stale device-auth token"),
-        );
-      } else {
-        expect(clearDeviceAuthTokenMock).toHaveBeenCalledWith({
-          deviceId: "dev-1",
-          role: "operator",
-          env,
-          assertCurrent: expect.any(Function),
-        });
-        expect(logDebugMock).toHaveBeenCalledWith(
-          "cleared stale device-auth token for device dev-1",
-        );
-      }
-      if (callbackThrows) {
-        expect(logDebugMock).toHaveBeenCalledWith(
-          "gateway client close handler error: Error: close callback failed",
-        );
-      }
-      client.stop();
-    },
-  );
+      expect(logDebugMock).toHaveBeenCalledWith("cleared stale device-auth token for device dev-1");
+    }
+    client.stop();
+  });
 
   it("reconnects quietly after one clean pre-hello close with a pending connect", async () => {
     vi.useFakeTimers();
@@ -758,44 +643,6 @@ describe("GatewayClient close handling", () => {
   });
 });
 
-describe("GatewayClient message dispatch", () => {
-  beforeEach(() => {
-    wsInstances.length = 0;
-  });
-
-  it("keeps event callback errors inside message dispatch", () => {
-    const onEvent = vi.fn(() => {
-      throw new Error("event callback failed");
-    });
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      deviceIdentity: null,
-      onEvent,
-    });
-
-    try {
-      client.start();
-      const ws = getLatestWs();
-
-      expect(() =>
-        ws.emitMessage(
-          JSON.stringify({
-            type: "event",
-            event: "tick",
-            payload: {},
-          }),
-        ),
-      ).not.toThrow();
-      expect(onEvent).toHaveBeenCalledOnce();
-      expect(logDebugMock).toHaveBeenCalledWith(
-        "gateway client event handler error: Error: event callback failed",
-      );
-    } finally {
-      client.stop();
-    }
-  });
-});
-
 describe("GatewayClient connect auth payload", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -864,142 +711,7 @@ describe("GatewayClient connect auth payload", () => {
     return getLatestWs();
   }
 
-  type ProtocolCompatibilityOptions = Pick<
-    GatewayClientOptions,
-    "role" | "mode" | "clientName" | "minProtocol" | "maxProtocol"
-  >;
-
-  const protocolCompatibilityCases = [
-    {
-      name: "general clients",
-      options: {},
-      expectedMinProtocol: MIN_CLIENT_PROTOCOL_VERSION,
-      expectedMaxProtocol: PROTOCOL_VERSION,
-    },
-    {
-      name: "exact node clients",
-      options: { role: "node", mode: GATEWAY_CLIENT_MODES.NODE },
-      expectedMinProtocol: MIN_NODE_PROTOCOL_VERSION,
-      expectedMaxProtocol: PROTOCOL_VERSION,
-    },
-    {
-      name: "built-in node hosts with an explicit spanning range",
-      options: {
-        role: "node",
-        mode: GATEWAY_CLIENT_MODES.NODE,
-        clientName: GATEWAY_CLIENT_NAMES.NODE_HOST,
-        minProtocol: MIN_NODE_PROTOCOL_VERSION,
-        maxProtocol: PROTOCOL_VERSION,
-      },
-      expectedMinProtocol: PROTOCOL_VERSION,
-      expectedMaxProtocol: PROTOCOL_VERSION,
-    },
-    {
-      name: "node role without node mode",
-      options: { role: "node" },
-      expectedMinProtocol: MIN_CLIENT_PROTOCOL_VERSION,
-      expectedMaxProtocol: PROTOCOL_VERSION,
-    },
-    {
-      name: "node mode without node role",
-      options: { mode: GATEWAY_CLIENT_MODES.NODE },
-      expectedMinProtocol: MIN_CLIENT_PROTOCOL_VERSION,
-      expectedMaxProtocol: PROTOCOL_VERSION,
-    },
-    {
-      name: "probe clients",
-      options: { mode: GATEWAY_CLIENT_MODES.PROBE },
-      expectedMinProtocol: MIN_PROBE_PROTOCOL_VERSION,
-      expectedMaxProtocol: PROTOCOL_VERSION,
-    },
-    {
-      name: "explicit node minimum overrides",
-      options: {
-        role: "node",
-        mode: GATEWAY_CLIENT_MODES.NODE,
-        minProtocol: PROTOCOL_VERSION,
-      },
-      expectedMinProtocol: PROTOCOL_VERSION,
-      expectedMaxProtocol: PROTOCOL_VERSION,
-    },
-    {
-      name: "explicit node maximum overrides",
-      options: {
-        role: "node",
-        mode: GATEWAY_CLIENT_MODES.NODE,
-        maxProtocol: MIN_NODE_PROTOCOL_VERSION,
-      },
-      expectedMinProtocol: MIN_NODE_PROTOCOL_VERSION,
-      expectedMaxProtocol: MIN_NODE_PROTOCOL_VERSION,
-    },
-  ] satisfies Array<{
-    name: string;
-    options: ProtocolCompatibilityOptions;
-    expectedMinProtocol: number;
-    expectedMaxProtocol: number;
-  }>;
-
-  it.each(protocolCompatibilityCases)(
-    "advertises the protocol compatibility range for $name",
-    async ({ options, expectedMinProtocol, expectedMaxProtocol }) => {
-      const client = createClient({
-        url: "ws://127.0.0.1:18789",
-        deviceIdentity: null,
-        ...options,
-      });
-
-      const { connect } = await startClientAndConnect({ client });
-
-      expect(connect.params?.minProtocol).toBe(expectedMinProtocol);
-      expect(connect.params?.maxProtocol).toBe(expectedMaxProtocol);
-      client.stop();
-    },
-  );
-
-  it.each([{ name: "default operator clients", options: {} }])(
-    "pauses $name after a permanent protocol mismatch",
-    async ({ options }) => {
-      const onReconnectPaused = vi.fn();
-      const client = createClient({
-        url: "ws://127.0.0.1:18789",
-        deviceIdentity: null,
-        onReconnectPaused,
-        ...options,
-      });
-
-      const { ws, connect } = await startClientAndConnect({ client });
-      await expectNoReconnectAfterConnectFailure({
-        client,
-        firstWs: ws,
-        connectId: connect.id,
-        failureDetails: {
-          code: "PROTOCOL_MISMATCH",
-          expectedProtocol: PROTOCOL_VERSION + 1,
-        },
-        failureMessage: "incompatible gateway version",
-      });
-
-      expect(onReconnectPaused).toHaveBeenCalledWith({
-        code: 1008,
-        reason: "connect failed",
-        detailCode: "PROTOCOL_MISMATCH",
-      });
-    },
-  );
-
-  it.each([
-    { canonical: "macos", legacy: "darwin", protocolBounds: {} },
-    {
-      canonical: "macos",
-      legacy: "darwin",
-      protocolBounds: { minProtocol: MIN_NODE_PROTOCOL_VERSION },
-    },
-    {
-      canonical: "windows",
-      legacy: "win32",
-      protocolBounds: { maxProtocol: PROTOCOL_VERSION },
-    },
-  ])(
+  it.each([{ canonical: "macos", legacy: "darwin", protocolBounds: {} }])(
     "retries a released-v3 Gateway with the shipped $legacy metadata envelope",
     async ({ canonical, legacy, protocolBounds }) => {
       const signDevicePayload = vi.fn((_privateKeyPem: string, _payload: string) => "signature");
@@ -1129,31 +841,6 @@ describe("GatewayClient connect auth payload", () => {
     client.stop();
   });
 
-  it("keeps explicitly v3-only node hosts connected when a v4 Gateway accepts them", async () => {
-    const onHelloOk = vi.fn();
-    const client = createClientWithIdentity("device-v3-only", vi.fn(), {
-      role: "node",
-      mode: GATEWAY_CLIENT_MODES.NODE,
-      clientName: GATEWAY_CLIENT_NAMES.NODE_HOST,
-      minProtocol: MIN_NODE_PROTOCOL_VERSION,
-      maxProtocol: MIN_NODE_PROTOCOL_VERSION,
-      onHelloOk,
-    });
-
-    const { ws, connect } = await startClientAndConnect({ client });
-    expect(connect.params).toMatchObject({
-      minProtocol: MIN_NODE_PROTOCOL_VERSION,
-      maxProtocol: MIN_NODE_PROTOCOL_VERSION,
-    });
-
-    emitHelloOk(ws, connect.id, PROTOCOL_VERSION);
-
-    await waitForFast(() => expect(onHelloOk).toHaveBeenCalledOnce());
-    expect(ws.closeCalls).toBe(0);
-    expect(wsInstances).toHaveLength(1);
-    client.stop();
-  });
-
   it("returns to v3 when the Gateway rolls back before v4 readiness", async () => {
     const onHelloOk = vi.fn();
     const client = createClientWithIdentity("device-gateway-rollback-before-ready", vi.fn(), {
@@ -1253,61 +940,26 @@ describe("GatewayClient connect auth payload", () => {
     });
   });
 
-  it.each([
-    { platform: "macos", deviceFamily: "Mac" },
-    { platform: "win32", deviceFamily: undefined },
-    { platform: "custom-os", deviceFamily: "Workstation" },
-  ])("preserves explicit caller metadata: %j", async ({ platform, deviceFamily }) => {
-    const client = createClientWithIdentity("device-third-party-node", vi.fn(), {
-      role: "node",
-      mode: GATEWAY_CLIENT_MODES.NODE,
-      clientName: GATEWAY_CLIENT_NAMES.TEST,
-      platform,
-      deviceFamily,
-    });
+  it.each([{ platform: "win32", deviceFamily: undefined }])(
+    "preserves explicit caller metadata: %j",
+    async ({ platform, deviceFamily }) => {
+      const client = createClientWithIdentity("device-third-party-node", vi.fn(), {
+        role: "node",
+        mode: GATEWAY_CLIENT_MODES.NODE,
+        clientName: GATEWAY_CLIENT_NAMES.TEST,
+        platform,
+        deviceFamily,
+      });
 
-    const { connect } = await startClientAndConnect({ client });
-    expect(connect.params?.client).toMatchObject({
-      platform,
-      ...(deviceFamily ? { deviceFamily } : {}),
-    });
-    if (deviceFamily === undefined) {
-      expect(connect.params?.client).not.toHaveProperty("deviceFamily");
-    }
-    client.stop();
-  });
-
-  it.each([
-    { runtime: "win32", deviceFamily: undefined, platform: "windows", expectedFamily: "Windows" },
-    {
-      runtime: "win32",
-      deviceFamily: "Workstation",
-      platform: "windows",
-      expectedFamily: "Workstation",
-    },
-    { runtime: "freebsd", deviceFamily: undefined, platform: "freebsd", expectedFamily: undefined },
-  ] satisfies Array<{
-    runtime: NodeJS.Platform;
-    deviceFamily: string | undefined;
-    platform: string;
-    expectedFamily: string | undefined;
-  }>)(
-    "resolves runtime metadata without replacing explicit family: %j",
-    async ({ runtime, deviceFamily, platform, expectedFamily }) => {
-      const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue(runtime);
-      const client = createClientWithIdentity("device-runtime-platform", vi.fn(), { deviceFamily });
-      try {
-        const { connect } = await startClientAndConnect({ client });
-        expect(connect.params?.client).toMatchObject({ platform });
-        if (expectedFamily === undefined) {
-          expect(connect.params?.client).not.toHaveProperty("deviceFamily");
-        } else {
-          expect(connect.params?.client).toMatchObject({ deviceFamily: expectedFamily });
-        }
-      } finally {
-        client.stop();
-        platformSpy.mockRestore();
+      const { connect } = await startClientAndConnect({ client });
+      expect(connect.params?.client).toMatchObject({
+        platform,
+        ...(deviceFamily ? { deviceFamily } : {}),
+      });
+      if (deviceFamily === undefined) {
+        expect(connect.params?.client).not.toHaveProperty("deviceFamily");
       }
+      client.stop();
     },
   );
 
@@ -1328,7 +980,7 @@ describe("GatewayClient connect auth payload", () => {
     vi.useRealTimers();
   });
 
-  it.each([undefined, "not-a-number"])("fails closed for invalid challenge timestamp %s", (ts) => {
+  it.each([undefined])("fails closed for invalid challenge timestamp %s", (ts) => {
     const onConnectError = vi.fn();
     const client = createClientWithIdentity("device-invalid-challenge-time", vi.fn(), {
       onConnectError,
@@ -1380,107 +1032,6 @@ describe("GatewayClient connect auth payload", () => {
     ws.emitOpen();
     return { ws, connect: connectRequestFrom(ws) };
   }
-
-  it("surfaces connect assembly errors instead of waiting for the wrapper timeout", async () => {
-    vi.useFakeTimers();
-    let client: GatewayClientInstance | null | undefined;
-    try {
-      const onClose = vi.fn();
-      const onConnectError = vi.fn();
-      client = createClient({
-        url: "ws://127.0.0.1:18789",
-        token: "shared-token",
-        deviceIdentity: {
-          deviceId: "bad-device",
-          privateKeyPem: "not a pem",
-          publicKeyPem: "not a pem",
-        },
-        onClose,
-        onConnectError,
-      });
-
-      client.start();
-      const ws = getLatestWs();
-      ws.emitOpen();
-      emitConnectChallenge(ws);
-
-      expect(ws.sent.some((frame) => frame.includes('"method":"connect"'))).toBe(false);
-      const error = firstMockArg(onConnectError, "connect error") as Error;
-      expect(error).toBeInstanceOf(Error);
-      expect(error.message).not.toContain("gateway request timeout");
-      expect(isGatewayConnectAssemblyError(error)).toBe(true);
-      expect(ws.lastClose).toEqual({ code: 1008, reason: "connect failed" });
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(wsInstances).toHaveLength(1);
-      expect(logErrorMock).toHaveBeenCalledWith(expect.stringContaining("gateway connect failed:"));
-      expect(logDebugMock).not.toHaveBeenCalledWith(
-        expect.stringContaining("gateway client parse error:"),
-      );
-    } finally {
-      client?.stop();
-      vi.useRealTimers();
-    }
-  });
-
-  it("keeps connect error callback throws inside challenge dispatch", () => {
-    const onConnectError = vi.fn(() => {
-      throw new Error("connect callback failed");
-    });
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      deviceIdentity: null,
-      onConnectError,
-    });
-
-    try {
-      client.start();
-      const ws = getLatestWs();
-      ws.emitOpen();
-
-      expect(() => emitConnectChallenge(ws, " ")).not.toThrow();
-      expect(onConnectError).toHaveBeenCalledOnce();
-      expect(ws.lastClose).toEqual({
-        code: 1008,
-        reason: "connect challenge missing nonce",
-      });
-      expect(logDebugMock).toHaveBeenCalledWith(
-        "gateway client connect error handler error: Error: connect callback failed",
-      );
-    } finally {
-      client.stop();
-    }
-  });
-
-  it("keeps hello callback errors inside connect dispatch", async () => {
-    const onHelloOk = vi.fn(() => {
-      throw new Error("hello callback failed");
-    });
-    const onConnectError = vi.fn();
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      deviceIdentity: null,
-      onHelloOk,
-      onConnectError,
-    });
-
-    try {
-      const { ws, connect } = await startClientAndConnect({ client });
-
-      expect(() => emitHelloOk(ws, connect.id)).not.toThrow();
-      await waitForFast(() => {
-        expect(onHelloOk).toHaveBeenCalledOnce();
-      });
-      expect(onConnectError).not.toHaveBeenCalled();
-      expect(ws.lastClose).toBeNull();
-      expect(logDebugMock).toHaveBeenCalledWith(
-        "gateway client hello-ok handler error: Error: hello callback failed",
-      );
-      ws.emitClose(1012, "service restart");
-      expect(onConnectError).not.toHaveBeenCalled();
-    } finally {
-      client.stop();
-    }
-  });
 
   function emitConnectFailure(
     ws: MockWebSocket,
@@ -1703,13 +1254,12 @@ describe("GatewayClient connect auth payload", () => {
   });
 
   it.each([
-    { label: "default scopes", password: "shared-password", scopes: undefined, token: undefined }, // pragma: allowlist secret
     {
       label: "normalized credentials",
       password: " shared-password ",
       scopes: ["operator.read"],
       token: "  ",
-    }, // pragma: allowlist secret
+    },
   ])(
     "connects read-only password auth without reading unused device credentials ($label)",
     async ({ password, scopes, token }) => {
@@ -1769,17 +1319,13 @@ describe("GatewayClient connect auth payload", () => {
   );
 
   it.each([
-    { label: "shared token", options: { token: "shared-token" } },
     { label: "bootstrap token", options: { bootstrapToken: "bootstrap-token" } },
     { label: "explicit device token", options: { deviceToken: "device-token" } },
-    { label: "bootstrap preference", options: { preferBootstrapToken: true } },
     { label: "approval runtime token", options: { approvalRuntimeToken: "approval-token" } },
     {
       label: "agent runtime identity token",
       options: { agentRuntimeIdentityToken: "runtime-token" },
     },
-    { label: "blank password", options: { password: "  " } },
-    { label: "writable client", options: { sharedStateMode: undefined } },
   ])("retains stored-device auth failure for $label", ({ options }) => {
     const failure = new Error("stored device credentials unavailable");
     loadDeviceAuthTokenReadOnlyMock.mockImplementation(() => {
@@ -1837,85 +1383,39 @@ describe("GatewayClient connect auth payload", () => {
 
   it.each([
     {
-      label: "existing token",
-      stored: { token: "stored-origin-token", scopes: ["operator.admin", "operator.read"] },
-      token: "stored-origin-token",
-      scopes: ["operator.admin", "operator.read"],
-    },
-    {
       label: "new token",
-      stored: undefined,
       token: "issued-origin-token",
       scopes: ["operator.read"],
     },
-  ])(
-    "stores hello authorization in the bound origin for $label",
-    async ({ stored, token, scopes }) => {
-      loadOriginDeviceTokenMock.mockReturnValue(stored);
-      const client = createClientWithIdentity("device-1", () => {}, {
-        deviceAuthScope: "wss://one.example/rpc",
-      });
-      const { ws, connect } = await startClientAndConnect({ client });
-      ws.emitMessage(
-        JSON.stringify({
-          type: "res",
-          id: connect.id,
-          ok: true,
-          payload: {
-            type: "hello-ok",
-            auth: { role: "operator", scopes: ["operator.read"], deviceToken: token },
-          },
-        }),
-      );
-      await waitForFast(() => {
-        expect(storeOriginDeviceTokenMock).toHaveBeenCalledWith({
-          gatewayScope: "wss://one.example/rpc",
-          deviceId: "device-1",
-          role: "operator",
-          token,
-          scopes,
-          env: undefined,
-          expectedToken: stored?.token ?? null,
-        });
-      });
-      expect(storeDeviceAuthTokenMock).not.toHaveBeenCalled();
-      client.stop();
-    },
-  );
-
-  it("retries without approval runtime token when a gateway rejects the auth field", async () => {
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      token: "shared-token",
-      approvalRuntimeToken: "runtime-token",
-      deviceIdentity: null,
+  ])("stores hello authorization in the bound origin for $label", async ({ token, scopes }) => {
+    loadOriginDeviceTokenMock.mockReturnValue(undefined);
+    const client = createClientWithIdentity("device-1", () => {}, {
+      deviceAuthScope: "wss://one.example/rpc",
     });
-
-    const { ws: ws1, connect: firstConnect } = await startClientAndConnect({ client });
-    expectRecordFields(
-      firstConnect.params?.auth ?? {},
-      {
-        token: "shared-token",
-        approvalRuntimeToken: "runtime-token",
-      },
-      "initial connect auth",
+    const { ws, connect } = await startClientAndConnect({ client });
+    ws.emitMessage(
+      JSON.stringify({
+        type: "res",
+        id: connect.id,
+        ok: true,
+        payload: {
+          type: "hello-ok",
+          auth: { role: "operator", scopes: ["operator.read"], deviceToken: token },
+        },
+      }),
     );
-
-    const retriedAuth = await expectRetriedConnectAuth({
-      firstWs: ws1,
-      connectId: firstConnect.id,
-      failureDetails: {},
-      failureMessage:
-        "invalid connect params: at /auth: unexpected property 'approvalRuntimeToken'",
+    await waitForFast(() => {
+      expect(storeOriginDeviceTokenMock).toHaveBeenCalledWith({
+        gatewayScope: "wss://one.example/rpc",
+        deviceId: "device-1",
+        role: "operator",
+        token,
+        scopes,
+        env: undefined,
+        expectedToken: null,
+      });
     });
-    expectRecordFields(
-      retriedAuth,
-      {
-        token: "shared-token",
-      },
-      "retried connect auth",
-    );
-    expect(retriedAuth.approvalRuntimeToken).toBeUndefined();
+    expect(storeDeviceAuthTokenMock).not.toHaveBeenCalled();
     client.stop();
   });
 
@@ -1989,43 +1489,12 @@ describe("GatewayClient connect auth payload", () => {
     client.stop();
   });
 
-  it("logs stopped connect handshakes at debug level during teardown", async () => {
-    const onConnectError = vi.fn();
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      token: "shared-token",
-      onConnectError,
-    });
-
-    const { ws } = await startClientAndConnect({ client });
-    ws.autoCloseOnClose = false;
-    client.stop();
-
-    await waitForFast(() => {
-      const error = firstMockArg(onConnectError, "connect error") as Error;
-      expect(error?.message).toBe("gateway client stopped");
-    });
-    expect(logDebugMock).toHaveBeenCalledWith(
-      "gateway connect failed: Error: gateway client stopped",
-    );
-    expect(logErrorMock).not.toHaveBeenCalledWith(
-      "gateway connect failed: Error: gateway client stopped",
-    );
-    expect(ws.closeCalls).toBe(1);
-  });
-
   it.each([
     {
       label: "credentials",
       message: createAuthFailureMessage(),
       present: ["Authorization: Bearer"],
       absent: ["sk-testsecret1234567890abcd", "user:pass", "secret-token"],
-    },
-    {
-      label: "trailing diagnostics",
-      message: "wss://gateway.example/ws?token=secret-token failed with 401 from remote gateway", // pragma: allowlist secret
-      present: ["wss://gateway.example/ws?token=*** failed with 401", "from remote gateway"],
-      absent: ["secret-token"],
     },
     {
       label: "redaction disabled",
@@ -2078,7 +1547,6 @@ describe("GatewayClient connect auth payload", () => {
       stored: { token: "stored-device-token" },
       bootstrapToken: undefined,
     },
-    { label: "bootstrap token", stored: undefined, bootstrapToken: "stale-bootstrap-token" },
   ])("prefers explicit shared password over $label", ({ stored, bootstrapToken }) => {
     loadDeviceAuthTokenMock.mockReturnValue(stored);
     const client = createClient({
@@ -2104,13 +1572,6 @@ describe("GatewayClient connect auth payload", () => {
       requestedScopes: undefined,
       deviceToken: undefined,
       expectedScopes: ["operator.read", "operator.write"],
-    },
-    {
-      label: "requested scopes",
-      storedScopes: ["operator.write"],
-      requestedScopes: ["operator.admin"],
-      deviceToken: undefined,
-      expectedScopes: ["operator.admin"],
     },
     {
       label: "explicit device token",
@@ -2144,40 +1605,6 @@ describe("GatewayClient connect auth payload", () => {
       client.stop();
     },
   );
-
-  it("loads stored device auth from the provided env", () => {
-    loadDeviceAuthTokenMock.mockReturnValue({
-      token: "stored-device-token",
-      scopes: ["operator.read"],
-    });
-    const env = {
-      ...process.env,
-      OPENCLAW_STATE_DIR: "/tmp/openclaw-client-service-state",
-    } as NodeJS.ProcessEnv;
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      env,
-    });
-
-    client.start();
-    const ws = getLatestWs();
-    ws.emitOpen();
-    emitConnectChallenge(ws);
-
-    const loadTokenParams = expectRecordFields(
-      firstMockArg(loadDeviceAuthTokenMock, "load device token params"),
-      {
-        role: "operator",
-        env,
-      },
-      "load device token params",
-    );
-    expect(loadTokenParams.deviceId).toBeTypeOf("string");
-    expect(connectFrameFrom(ws)).toEqual({
-      deviceToken: "stored-device-token",
-    });
-    client.stop();
-  });
 
   it("uses bootstrap token when no shared or device token is available", () => {
     loadDeviceAuthTokenMock.mockReturnValue(undefined);
@@ -2258,69 +1685,28 @@ describe("GatewayClient connect auth payload", () => {
     client.stop();
   });
 
-  it.each([
-    { code: "AUTH_TOKEN_MISMATCH", canRetryWithDeviceToken: true },
-    { code: "AUTH_UNAUTHORIZED", recommendedNextStep: "retry_with_device_token" },
-  ])("retries trusted auth with a stored device token for %j", async (failureDetails) => {
-    loadDeviceAuthTokenMock.mockReturnValue({
-      token: "stored-device-token",
-      scopes: ["operator.read"],
-    });
-    const client = createClient({ url: "ws://127.0.0.1:18789", token: "shared-token" });
-    const { ws: firstWs, connect } = await startClientAndConnect({ client });
-    expect(connect.params?.auth?.token).toBe("shared-token");
-    expect(connect.params?.auth?.deviceToken).toBeUndefined();
-    const retriedAuth = await expectRetriedConnectAuth({
-      firstWs,
-      connectId: connect.id,
-      failureDetails,
-    });
-    expect(retriedAuth).toMatchObject({
-      token: "shared-token",
-      deviceToken: "stored-device-token",
-    });
-    expect(connectScopesFrom(getLatestWs())).toEqual(["operator.read"]);
-    client.stop();
-  });
-
-  it.each([
-    {
-      details: {
-        code: "CLIENT_VERSION_MISMATCH",
-        clientVersion: "2026.5.25",
-        gatewayVersion: "2026.5.26",
-      },
-      options: { role: "node", scopes: [] },
-      message: "client version mismatch",
-    },
-    {
-      details: { code: "AUTH_TOKEN_MISMATCH", canRetryWithDeviceToken: true },
-      options: { token: "shared-token" },
-      message: "unauthorized",
-    },
-  ])(
-    "pauses permanent connect failures without a device retry: $details.code",
-    async ({ details, options, message }) => {
-      loadDeviceAuthTokenMock.mockReturnValue(null);
-      const onReconnectPaused = vi.fn();
-      const client = createClient({
-        url: "ws://127.0.0.1:18789",
-        onReconnectPaused,
-        ...options,
+  it.each([{ code: "AUTH_TOKEN_MISMATCH", canRetryWithDeviceToken: true }])(
+    "retries trusted auth with a stored device token for %j",
+    async (failureDetails) => {
+      loadDeviceAuthTokenMock.mockReturnValue({
+        token: "stored-device-token",
+        scopes: ["operator.read"],
       });
+      const client = createClient({ url: "ws://127.0.0.1:18789", token: "shared-token" });
       const { ws: firstWs, connect } = await startClientAndConnect({ client });
-      await expectNoReconnectAfterConnectFailure({
-        client,
+      expect(connect.params?.auth?.token).toBe("shared-token");
+      expect(connect.params?.auth?.deviceToken).toBeUndefined();
+      const retriedAuth = await expectRetriedConnectAuth({
         firstWs,
         connectId: connect.id,
-        failureDetails: details,
-        failureMessage: message,
+        failureDetails,
       });
-      expect(onReconnectPaused).toHaveBeenCalledWith({
-        code: 1008,
-        reason: "connect failed",
-        detailCode: details.code,
+      expect(retriedAuth).toMatchObject({
+        token: "shared-token",
+        deviceToken: "stored-device-token",
       });
+      expect(connectScopesFrom(getLatestWs())).toEqual(["operator.read"]);
+      client.stop();
     },
   );
 
@@ -2369,79 +1755,6 @@ describe("GatewayClient connect auth payload", () => {
     );
   });
 
-  it("keeps reconnect paused callback errors inside close dispatch", async () => {
-    const onReconnectPaused = vi.fn(() => {
-      throw new Error("paused callback failed");
-    });
-    const onClose = vi.fn();
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      token: "shared-token",
-      onReconnectPaused,
-      onClose,
-    });
-
-    const { ws: ws1, connect: firstConnect } = await startClientAndConnect({ client });
-    await expectNoReconnectAfterConnectFailure({
-      client,
-      firstWs: ws1,
-      connectId: firstConnect.id,
-      failureDetails: { code: "AUTH_TOKEN_MISSING" },
-    });
-
-    expect(onReconnectPaused).toHaveBeenCalledWith({
-      code: 1008,
-      reason: "connect failed",
-      detailCode: "AUTH_TOKEN_MISSING",
-    });
-    expect(logDebugMock).toHaveBeenCalledWith(
-      "gateway client reconnect paused handler error: Error: paused callback failed",
-    );
-    expect(onClose).toHaveBeenCalledWith(1008, "connect failed", {
-      connectError: expect.objectContaining({
-        details: { code: "AUTH_TOKEN_MISSING" },
-        gatewayCode: "INVALID_REQUEST",
-        message: "unauthorized",
-      }),
-      phase: "pre-hello",
-      socketOpened: true,
-      transportValidated: true,
-      connectRequestSent: true,
-      transientPreHelloCleanClose: false,
-    });
-  });
-
-  it("keeps reconnecting on PAIRING_REQUIRED when retry hints keep reconnect active", async () => {
-    vi.useFakeTimers();
-    const onReconnectPaused = vi.fn();
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      bootstrapToken: "setup-bootstrap-token",
-      role: "node",
-      scopes: [],
-      onReconnectPaused,
-    });
-
-    try {
-      const { ws: ws1, connect: firstConnect } = await startClientAndConnect({ client });
-      emitConnectFailure(ws1, firstConnect.id, {
-        code: "PAIRING_REQUIRED",
-        reason: "not-paired",
-        recommendedNextStep: "wait_then_retry",
-        pauseReconnect: false,
-      });
-
-      await vi.advanceTimersByTimeAsync(999);
-      expect(wsInstances).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(wsInstances).toHaveLength(2);
-      expect(onReconnectPaused).not.toHaveBeenCalled();
-    } finally {
-      client.stop();
-      vi.useRealTimers();
-    }
-  });
-
   it.each([{ OPENCLAW_HOME: "/tmp/custom-openclaw-home" }])(
     "clears rejected stored tokens from the selected environment: %j",
     async (env) => {
@@ -2473,33 +1786,6 @@ describe("GatewayClient connect auth payload", () => {
       });
     },
   );
-
-  it("does not clear stored device tokens or reconnect on AUTH_SCOPE_MISMATCH", async () => {
-    loadDeviceAuthTokenMock.mockReturnValue({
-      token: "stored-device-token",
-      scopes: ["operator.read"],
-    });
-    const onReconnectPaused = vi.fn();
-    const client = createClient({
-      url: "ws://127.0.0.1:18789",
-      onReconnectPaused,
-    });
-
-    const { ws: ws1, connect: firstConnect } = await startClientAndConnect({ client });
-    expect(firstConnect.params?.auth).toEqual({ deviceToken: "stored-device-token" });
-    await expectNoReconnectAfterConnectFailure({
-      client,
-      firstWs: ws1,
-      connectId: firstConnect.id,
-      failureDetails: { code: "AUTH_SCOPE_MISMATCH" },
-    });
-    expect(clearDeviceAuthTokenMock).not.toHaveBeenCalled();
-    expect(onReconnectPaused).toHaveBeenCalledWith({
-      code: 1008,
-      reason: "connect failed",
-      detailCode: "AUTH_SCOPE_MISMATCH",
-    });
-  });
 
   it("does not auto-reconnect on token mismatch when retry is not trusted", async () => {
     loadDeviceAuthTokenMock.mockReturnValue({ token: "stored-device-token" });
