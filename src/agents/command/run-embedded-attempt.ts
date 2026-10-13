@@ -1,4 +1,5 @@
 import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
+import { buildTerminalAgentRunFailureReplyPayload } from "../../auto-reply/reply/agent-runner-failure-reply.js";
 import { applyModelRuntimeDirective } from "../../auto-reply/reply/directive-handling.model-runtime.js";
 import { formatThinkingLevelClampNotice } from "../../auto-reply/thinking.shared.js";
 import { resolveSessionAuthProfileOverrideSource } from "../../config/sessions/auth-profile-override-provenance.js";
@@ -17,6 +18,7 @@ import {
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createTrajectoryRuntimeRecorder } from "../../trajectory/runtime.js";
 import { resolveMessageChannel } from "../../utils/message-channel.js";
+import { buildAgentRunTerminalOutcomeFromLifecycleEvent } from "../agent-run-terminal-outcome.js";
 import {
   clearAutoFallbackPrimaryProbeSelection,
   entryMatchesAutoFallbackPrimaryProbe,
@@ -24,6 +26,7 @@ import {
   resolveEffectiveModelFallbacks,
 } from "../agent-scope.js";
 import { isHeartbeatLifecycleRunKind } from "../bootstrap-mode.js";
+import { buildRunEntryTerminal } from "../embedded-agent-runner/run-entry-terminal.js";
 import {
   runEmbeddedAgentEntry,
   type EmbeddedAgentRunEntryTerminal,
@@ -43,6 +46,7 @@ import {
   resolveThinkingSelection,
 } from "../model-thinking-default.js";
 import { createModelVisibilityPolicy } from "../model-visibility-policy.js";
+import { PreparedModelRuntimeInitialRunAdmissionError } from "../prepared-model-runtime.errors.js";
 import {
   AGENT_RUN_RESTART_ABORT_STOP_REASON,
   createAgentRunRestartAbortError,
@@ -220,6 +224,7 @@ export async function runEmbeddedAgentAttempt(params: RunEmbeddedAgentAttemptPar
   let fallbackExhausted = false;
   let terminal: EmbeddedAgentRunEntryTerminal;
   let liveSwitchRetries = 0;
+  let candidateAttempts = 0;
   let autoFallbackPrimaryProbeInterruptedByLiveSwitch = false;
   const fastModeStartedAtMs = Date.now();
   const assertTrajectoryCurrent = () => {
@@ -375,6 +380,7 @@ export async function runEmbeddedAgentAttempt(params: RunEmbeddedAgentAttemptPar
           fallbackTrajectoryRecorder?.recordEvent("model.fallback_step", step);
         },
         runCandidate: async (providerOverride, modelOverride, runOptions) => {
+          candidateAttempts += 1;
           clearAgentRunTerminalWriteContext(params.preparedRunAdmission.operationalRunInstance);
           const candidateAccounting = compactionAccounting.beginCandidate(deferredLifecycle.signal);
           maintenanceAuthProfile = undefined;
@@ -607,7 +613,58 @@ export async function runEmbeddedAgentAttempt(params: RunEmbeddedAgentAttemptPar
         lifecycle.emitFinishing(terminal);
       }
       break;
-    } catch (err) {
+    } catch (caught) {
+      let err = caught;
+      if (
+        err instanceof PreparedModelRuntimeInitialRunAdmissionError &&
+        candidateAttempts === 1 &&
+        params.opts.deliver === true &&
+        !params.suppressVisibleSessionEffects
+      ) {
+        try {
+          assertTrajectoryCurrent();
+          deferredLifecycle.signal.throwIfAborted();
+          // Keep the execution failed, but give normal finalization custody of its
+          // visible failure notice and receipt before the recovery claim is retired.
+          attemptLifecycleState.lifecycleError = err.message;
+          result = {
+            payloads: [
+              buildTerminalAgentRunFailureReplyPayload({
+                replyExpectation: "required",
+                visibleReplyDelivered: false,
+              }),
+            ],
+            meta: {
+              durationMs: Date.now() - startedAt,
+              stopReason: "error",
+              providerStarted: false,
+            },
+          };
+          terminal = buildRunEntryTerminal({
+            result,
+            outcome: buildAgentRunTerminalOutcomeFromLifecycleEvent({
+              phase: "error",
+              data: { ...result.meta, error: err.message },
+            }),
+            behavior: {
+              kind: "command-rpc",
+              hasCommittedSideEffect: () =>
+                hasNewGeneratedMediaTaskForSessionKey(
+                  sessionKey,
+                  liveSwitchMediaTaskIds,
+                  sessionAgentId,
+                ),
+            },
+            runId,
+            requested: { provider, model },
+            sessionId,
+          });
+          lifecycle.emitFinishing(terminal);
+          break;
+        } catch (admissionError) {
+          err = admissionError;
+        }
+      }
       if (err instanceof LiveSessionModelSwitchError) {
         if (isModelSelectionLocked(sessionEntry)) {
           lifecycle.emitBasicError(MODEL_SELECTION_LOCKED_MESSAGE);
