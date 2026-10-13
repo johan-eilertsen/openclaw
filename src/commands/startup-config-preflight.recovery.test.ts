@@ -199,7 +199,6 @@ it("restores the admitted backup after database readiness exceeds the lease TTL"
 it.each(["backup", "active config"] as const)(
   "refuses changed %s under the lease before any repair",
   async (kind) => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     await withPreflightHome(async (home) => {
       const stateDir = path.join(home, ".openclaw");
       const configPath = path.join(stateDir, "openclaw.json");
@@ -239,19 +238,23 @@ it.each(["backup", "active config"] as const)(
           expect(await prepareGatewayRunBootstrap({ opts: {}, runtime })).toBe(true);
           const acquire = checkpoint.acquireStartupMigrationLeaseWithWait;
           let heartbeat: MockInstance<checkpoint.StartupMigrationLease["heartbeat"]> | undefined;
-          vi.spyOn(checkpoint, "acquireStartupMigrationLeaseWithWait").mockImplementationOnce(
-            async (params) => {
+          const acquisition = vi
+            .spyOn(checkpoint, "acquireStartupMigrationLeaseWithWait")
+            .mockImplementationOnce(async (params) => {
               const lease = await acquire(params);
               heartbeat = vi.spyOn(lease, "heartbeat");
+              // Admission observers own real timers; this clock tracks the lease heartbeat.
+              vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
               await fs.writeFile(kind === "backup" ? `${configPath}.bak` : configPath, replacement);
               return lease;
-            },
-          );
+            });
           const refusal = await runStartupConfigPreflight({
             gateway: true,
             beforeStatePreparation: (snapshot) =>
               recheckGatewayRunBootstrap({ opts: {}, runtime, snapshot }),
           }).catch((error: unknown) => error);
+          expect(acquisition).toHaveBeenCalledTimes(1);
+          expect(vi.getTimerCount()).toBe(0);
           expect(heartbeat).toBeDefined();
           heartbeat?.mockClear();
           await vi.advanceTimersByTimeAsync(60_000);
@@ -275,7 +278,6 @@ it.each([
   ["reacquires a reassigned migration lease during admission", "reassigned"],
   ["fails after three attempts when the lease is lost on every attempt", "always expired"],
 ] as const)("%s", async (_title, loss) => {
-  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   await withPreflightHome(async (home) => {
     const stateDir = path.join(home, ".openclaw");
     const configPath = path.join(stateDir, "openclaw.json");
@@ -313,6 +315,9 @@ it.each([
         if (loss === "reassigned") {
           const replacement = await acquire({ ...params, timeoutMs: 0 });
           replacement.release();
+        }
+        if (!vi.isFakeTimers()) {
+          vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
         }
         return stale;
       },

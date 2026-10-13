@@ -2,10 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import {
-  isPrimarySessionTranscriptFileName,
-  resolveTrajectoryPointerPath,
-} from "../config/sessions/artifacts.js";
+import { isPrimarySessionTranscriptFileName } from "../config/sessions/artifacts.js";
 import {
   isLegacySessionRecordOwnedByTarget,
   shouldFilterLegacySessionRecordsByTarget,
@@ -78,18 +75,20 @@ export function collectRetainedTrajectoryPointers(
   sources: ReadonlySet<string>,
   conflicts?: ReadonlyMap<string, string>,
 ): string[] {
-  return [...sources].flatMap((source) => {
-    const pointer = resolveTrajectoryPointerPath(source);
-    if (pointer && sources.has(pointer) && !conflicts?.has(source) && !fs.existsSync(source)) {
-      return [pointer];
+  return [...sources].filter((source) => {
+    const transcript = source.replace(/\.trajectory-path\.json$/u, ".jsonl");
+    if (sources.has(transcript)) {
+      // Receipt-backed pointers follow transcript verification, not a missing runtime target.
+      return transcript !== source && !conflicts?.has(transcript) && !fs.existsSync(transcript);
     }
     const target = source.endsWith(".trajectory-path.json") && tryReadJsonSync(source);
-    return isRecord(target) &&
+    return (
+      isRecord(target) &&
       target.traceSchema === "openclaw-trajectory-pointer" &&
       typeof target.runtimeFile === "string" &&
+      !fs.existsSync(transcript) &&
       !fs.existsSync(path.resolve(path.dirname(source), target.runtimeFile))
-      ? [source]
-      : [];
+    );
   });
 }
 
@@ -140,7 +139,8 @@ export function retireDeferredPluginSessionImport(
           return;
         }
         // Diagnostic callbacks and cached verification cannot authorize retirement.
-        readDeferredPluginSessionImport({ ...params, database: db });
+        const { cfg, env, target, sqlitePath } = params;
+        readDeferredPluginSessionImport({ cfg, env, target, sqlitePath, database: db });
         markLegacyMigrationSourceRemovedInDatabase(db, receipt.sourceKey);
       }),
     { env: params.env },
