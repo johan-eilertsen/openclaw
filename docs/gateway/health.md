@@ -47,6 +47,12 @@ agents still preparing and `stage` identifies the current acquisition phase.
 The Gateway remains running and completed agents remain usable. Background
 preparation clears the degraded status when all runtimes are ready.
 
+Transcript projection repair runs after readiness in yielding worker-backed work.
+An agent deferred by database inspection becomes usable after its session,
+credentials, and model preparation finish; rebuilding its transcript projections
+does not hold agent admission or another agent's preparation. Shutdown still joins
+accepted repair work, and repair failures are logged without withdrawing admission.
+
 Health and status collection groups fast session-store reads into short work
 slices, keeping busy background preparation from delaying every individual read.
 Slow reads finish their transaction before yielding to other Gateway work.
@@ -91,7 +97,9 @@ The HTTP listener opens before the initial session projection is complete. Durin
 that build, `/healthz` can return `200`, while `/startupz` and `/readyz` remain
 pending. Other HTTP requests and WebSocket upgrades wait for the complete
 projection before authentication and routing; they never see a partial roster.
-Discovery and remote-skill setup run alongside projection preparation. Readiness
+Discovery and remote-skill listeners run alongside projection preparation. The
+initial fleet-wide skills scan runs in tracked maintenance after readiness;
+on-demand skill reads still prepare the requested workspace. Readiness
 also waits for the reply and WebSocket connection modules to load, so immediate
 connections and first turns reuse the prepared runtime.
 Update verification still waits for startup completion before checking readiness.
