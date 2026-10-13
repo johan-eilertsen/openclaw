@@ -7,14 +7,15 @@ import { createScriptTestHarness } from "./test-helpers.js";
 const { createTempDir } = createScriptTestHarness();
 
 describe("linkSourcePluginDependencies", () => {
-  it("omits host and ancestor packages while preserving plugin dependencies", () => {
+  it.each([true, false])("preserves plugin dependencies (checkout host: %s)", (checkoutHost) => {
     const root = fs.realpathSync(createTempDir("openclaw-plugin-dependency-links-"));
     const plugin = path.join(root, "extensions", "x");
     const modules = path.join(plugin, "node_modules");
     const destination = path.join(root, "dist", "extensions", "x", "node_modules");
+    const host = checkoutHost ? root : path.join(root, "installed", "openclaw");
     fs.mkdirSync(modules, { recursive: true });
     for (const [name, target] of [
-      ["openclaw", root],
+      ["openclaw", host],
       ["ancestor-alias", root],
       ["@fixture/dependency", path.join(root, "payload")],
       [".bin", path.join(root, "launchers")],
@@ -25,7 +26,10 @@ describe("linkSourcePluginDependencies", () => {
     }
     fs.writeFileSync(path.join(root, "payload", "index.cjs"), "module.exports = 'dependency';");
     linkSourcePluginDependencies(plugin, destination);
-    expect(fs.existsSync(path.join(destination, "openclaw"))).toBe(false);
+    expect(fs.existsSync(path.join(destination, "openclaw"))).toBe(!checkoutHost);
+    if (!checkoutHost) {
+      expect(fs.realpathSync(path.join(destination, "openclaw"))).toBe(host);
+    }
     expect(fs.existsSync(path.join(destination, "ancestor-alias"))).toBe(false);
     expect(fs.realpathSync(path.join(destination, "@fixture", "dependency"))).toBe(
       path.join(root, "payload"),

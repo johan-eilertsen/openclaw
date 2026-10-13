@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterAll, expect, it, vi } from "vitest";
 import { copyTreeCloseOnExec } from "../../test/helpers/close-on-exec-copy.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { resolveMutableUpdateFailure } from "../cli/update-cli/update-command-result.js";
 import { resolveSystemNodeInfo } from "../daemon/runtime-paths.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import * as processExec from "../process/exec.js";
@@ -498,14 +497,20 @@ export function registerGitRuntimeStagingTests(
           vi.spyOn(fs, "cp").mockRejectedValueOnce(failure);
         },
       }).catch((error: unknown) => error);
-      const { result } = await resolveMutableUpdateFailure({
-        cause,
-        durationMs: 0,
-        mode: "git",
-        root,
-        originalRecovery: () => verifyGitUpdateRecovery({ root, sha: beforeSha }),
-      });
-      expect(result.recovery).toMatchObject({ serviceRestartSafe: true, buildId: beforeSha });
+      if (failurePoint === "validation") {
+        expect(cause).toBe(failure);
+      } else {
+        const { resolveMutableUpdateFailure } =
+          await import("../cli/update-cli/update-command-result.js");
+        const { result } = await resolveMutableUpdateFailure({
+          cause,
+          durationMs: 0,
+          mode: "git",
+          root,
+          originalRecovery: () => verifyGitUpdateRecovery({ root, sha: beforeSha }),
+        });
+        expect(result.recovery).toMatchObject({ serviceRestartSafe: true, buildId: beforeSha });
+      }
       expect(isStopped()).toBe(false);
       expect(await git(root, "rev-parse", "HEAD")).toBe(beforeSha);
       expect(await fs.readFile(path.join(root, "node_modules", "identity.cjs"), "utf8")).toContain(

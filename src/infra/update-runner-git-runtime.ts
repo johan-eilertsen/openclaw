@@ -291,20 +291,17 @@ export async function prepareGitRuntimePromotion(
     }
   };
   const filter = (source: string, destination: string) => {
-    if (disposableCaches.has(source)) {
-      return false;
-    }
     if (
       process.platform === "win32" &&
       fsSync.lstatSync(source).isSymbolicLink() &&
       fsSync.statSync(source).isDirectory()
     ) {
-      // Node's link handler creates privileged directory symlinks; junctions need no elevation.
+      // Windows junctions avoid native copy recursion and privileged directory symlinks.
       const target = path.resolve(path.dirname(source), fsSync.readlinkSync(source));
       fsSync.symlinkSync(target, destination, "junction");
       return false;
     }
-    return true;
+    return !disposableCaches.has(source);
   };
   try {
     for (const { sourceRoot, destinationRoot: destination } of roots) {
@@ -321,7 +318,6 @@ export async function prepareGitRuntimePromotion(
         recursive: true,
         preserveTimestamps: true,
         verbatimSymlinks: true,
-        // A filter keeps Windows junctions out of Node's native directory-copy path.
         filter: process.platform === "win32" || disposableCaches.size > 0 ? filter : undefined,
       });
       assertDestination?.(destination);

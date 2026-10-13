@@ -168,14 +168,9 @@ describe("reference source candidate preparation", () => {
             });
           },
         );
-        if (phase === "joined-failure") {
-          await expect(preparation).rejects.toMatchObject({
-            name: "UpdatePreMutationError",
-            cause: joinedFailure,
-          });
-        } else {
-          await expect(preparation).rejects.toBe(uncertainFailure);
-        }
+        await expect(preparation).rejects.toBe(
+          phase === "joined-failure" ? joinedFailure : uncertainFailure,
+        );
         assert(mirror);
         assert(worktree);
         if (phase === "joined-failure") {

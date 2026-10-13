@@ -631,7 +631,9 @@ export async function runGitCandidatePreflight(params: {
   } catch (error) {
     cleanupUncertain = hasCommandProcessCleanupError(error);
     const failedStep = params.steps.findLast(isFailedUpdateStep);
-    throw cleanupUncertain || error instanceof UpdatePreMutationError
+    throw cleanupUncertain ||
+      failedStep?.name !== "preflight-runtime-stage" ||
+      error instanceof UpdatePreMutationError
       ? error
       : new UpdatePreMutationError("git-preflight-failed", formatErrorMessage(error), {
           cause: error,
