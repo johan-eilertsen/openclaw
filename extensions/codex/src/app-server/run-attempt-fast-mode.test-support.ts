@@ -109,14 +109,20 @@ export function registerCodexFastModeTests({
       nativeOwned: false,
     },
     ...[false, true].flatMap((fresh) =>
-      [700_000, 120_000, undefined].map((nativeLimit) => ({
+      [
+        [700_000, 260_000],
+        [120_000, 120_000],
+        [0, 0],
+        [-1, -1],
+        [undefined, 260_000],
+      ].map(([nativeLimit, expectedLimit]) => ({
         name: `Ultrafast ${fresh ? "start" : "resume"} with native limit ${nativeLimit}`,
         supported: true,
         fastMode: "ultrafast" as const,
         enableUltrafast: true,
         expected: "ultrafast",
         nativeLimit,
-        expectedLimit: nativeLimit === 120_000 ? 120_000 : 260_000,
+        expectedLimit,
         fresh,
         nativeOwned: false,
       })),

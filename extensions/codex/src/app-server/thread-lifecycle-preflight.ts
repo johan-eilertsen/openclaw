@@ -211,7 +211,7 @@ export async function prepareCodexThreadRequestContext(
     params.config = {
       ...params.config,
       model_auto_compact_token_limit:
-        typeof configuredLimit === "number" && configuredLimit > 0
+        typeof configuredLimit === "number"
           ? Math.min(configuredLimit, contextTokenCap)
           : contextTokenCap,
       // Body-only limits exclude the initial prefix, which can exceed the serving ceiling.
