@@ -270,57 +270,83 @@ it.each(["backup", "active config"] as const)(
   },
 );
 
-it.each(["expired", "reassigned"] as const)(
-  "reacquires the migration lease when it is %s during admission",
-  async (loss) => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-    await withPreflightHome(async (home) => {
-      const stateDir = path.join(home, ".openclaw");
-      const configPath = path.join(stateDir, "openclaw.json");
-      await fs.mkdir(stateDir, { recursive: true });
-      const original = '{"update":{"channel":"stable"}}\n';
-      await fs.writeFile(configPath, original);
-      await fs.writeFile(
-        `${configPath}.bak`,
-        JSON.stringify({
-          gateway: { mode: "local" },
-          plugins: { enabled: false },
-          meta: { migrations: { webhookListeners: true } },
-        }),
-      );
-      openOpenClawStateDatabase({ path: path.join(stateDir, "state", "openclaw.sqlite") });
-      closeOpenClawStateDatabaseForTest();
-      let heartbeat: MockInstance<checkpoint.StartupMigrationLease["heartbeat"]> | undefined;
-      const acquire = checkpoint.acquireStartupMigrationLeaseWithWait;
-      vi.spyOn(checkpoint, "acquireStartupMigrationLeaseWithWait").mockImplementationOnce(
-        async (params) => {
-          const stale = await acquire({
-            ...params,
-            now: () => Date.now() - checkpoint.STARTUP_MIGRATION_LEASE_TTL_MS - 1,
-            timeoutMs: 0,
-          });
-          heartbeat = vi.spyOn(stale, "heartbeat");
-          if (loss === "reassigned") {
-            const replacement = await acquire({ ...params, timeoutMs: 0 });
-            replacement.release();
-          }
-          return stale;
-        },
-      );
-      const result = await runStartupConfigPreflight({ gateway: true });
-      expect(result.snapshot.valid).toBe(true);
-      expect(JSON.parse(await fs.readFile(configPath, "utf8"))).toMatchObject({
+it.each([
+  ["reacquires an expired migration lease during admission", "expired"],
+  ["reacquires a reassigned migration lease during admission", "reassigned"],
+  ["fails after three attempts when the lease is lost on every attempt", "always expired"],
+] as const)("%s", async (_title, loss) => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  await withPreflightHome(async (home) => {
+    const stateDir = path.join(home, ".openclaw");
+    const configPath = path.join(stateDir, "openclaw.json");
+    await fs.mkdir(stateDir, { recursive: true });
+    const original = '{"update":{"channel":"stable"}}\n';
+    await fs.writeFile(configPath, original);
+    await fs.writeFile(
+      `${configPath}.bak`,
+      JSON.stringify({
         gateway: { mode: "local" },
-      });
-      const clobbered = (await fs.readdir(stateDir)).filter((name) => name.includes(".clobbered."));
-      expect(clobbered).toHaveLength(1);
-      expect(await fs.readFile(path.join(stateDir, clobbered[0]!), "utf8")).toBe(original);
+        plugins: { enabled: false },
+        meta: { migrations: { webhookListeners: true } },
+      }),
+    );
+    openOpenClawStateDatabase({ path: path.join(stateDir, "state", "openclaw.sqlite") });
+    closeOpenClawStateDatabaseForTest();
+    const acquire = checkpoint.acquireStartupMigrationLeaseWithWait;
+    let attempts = 0;
+    let heartbeat: MockInstance<checkpoint.StartupMigrationLease["heartbeat"]> | undefined;
+    vi.spyOn(checkpoint, "acquireStartupMigrationLeaseWithWait").mockImplementation(
+      async (params) => {
+        attempts++;
+        if (loss === "always expired" && attempts > 3) {
+          throw new Error("Startup retried after the third lost lease.");
+        }
+        if (attempts > 1 && loss !== "always expired") {
+          return acquire(params);
+        }
+        const stale = await acquire({
+          ...params,
+          now: () => Date.now() - checkpoint.STARTUP_MIGRATION_LEASE_TTL_MS - 1,
+          timeoutMs: 0,
+        });
+        heartbeat = vi.spyOn(stale, "heartbeat");
+        if (loss === "reassigned") {
+          const replacement = await acquire({ ...params, timeoutMs: 0 });
+          replacement.release();
+        }
+        return stale;
+      },
+    );
+    if (loss === "always expired") {
+      await expect(runStartupConfigPreflight({ gateway: true })).rejects.toBeInstanceOf(
+        checkpoint.StartupMigrationLeaseLostError,
+      );
+      expect(attempts).toBe(3);
+      expect(await fs.readFile(configPath, "utf8")).toBe(original);
+      expect((await fs.readdir(stateDir)).filter((name) => name.includes(".clobbered."))).toEqual(
+        [],
+      );
       expect(vi.getTimerCount()).toBe(0);
       expect(heartbeat).toBeDefined();
       heartbeat?.mockClear();
       await vi.advanceTimersByTimeAsync(60_000);
       expect(heartbeat).not.toHaveBeenCalled();
       expect(checkpoint.hasActiveStartupMigrationLease()).toBe(false);
+      return;
+    }
+    const result = await runStartupConfigPreflight({ gateway: true });
+    expect(result.snapshot.valid).toBe(true);
+    expect(JSON.parse(await fs.readFile(configPath, "utf8"))).toMatchObject({
+      gateway: { mode: "local" },
     });
-  },
-);
+    const clobbered = (await fs.readdir(stateDir)).filter((name) => name.includes(".clobbered."));
+    expect(clobbered).toHaveLength(1);
+    expect(await fs.readFile(path.join(stateDir, clobbered[0]!), "utf8")).toBe(original);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(heartbeat).toBeDefined();
+    heartbeat?.mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(heartbeat).not.toHaveBeenCalled();
+    expect(checkpoint.hasActiveStartupMigrationLease()).toBe(false);
+  });
+});

@@ -21,6 +21,8 @@ import {
 } from "./doctor-startup-migration-refusal.js";
 import { cleanupStartupPluginSourceCaptures } from "./startup-plugin-source-captures.js";
 
+// Persistent lease loss must reach the operator instead of retrying startup forever.
+const STARTUP_LEASE_ATTEMPTS = 3;
 export type StartupConfigPreflightOptions = {
   gateway: boolean;
   observe?: boolean;
@@ -37,7 +39,7 @@ export type StartupConfigPreflightResult = ReturnType<typeof result> & {
 export async function runStartupConfigPreflight(
   options: StartupConfigPreflightOptions,
 ): Promise<StartupConfigPreflightResult> {
-  for (;;) {
+  for (let attempt = 1; ; attempt++) {
     await using snapshots = createConfigPreflightSnapshotReader();
     const { withSqliteReadOnlyWorkerScope } = await import("../infra/sqlite-readonly-worker.js");
     try {
@@ -51,7 +53,7 @@ export async function runStartupConfigPreflight(
     } catch (error) {
       const { StartupMigrationLeaseLostError } =
         await import("../infra/startup-migration-checkpoint.js");
-      if (error instanceof StartupMigrationLeaseLostError) {
+      if (error instanceof StartupMigrationLeaseLostError && attempt < STARTUP_LEASE_ATTEMPTS) {
         recordStartupMigrationWarnings(["Startup migration lease lost; reacquiring and retrying."]);
         continue;
       }
