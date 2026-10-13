@@ -290,6 +290,22 @@ export async function prepareGitRuntimePromotion(
       throw new AggregateError(failures, "Git runtime backup cleanup did not finish.");
     }
   };
+  const filter = (source: string, destination: string) => {
+    if (disposableCaches.has(source)) {
+      return false;
+    }
+    if (
+      process.platform === "win32" &&
+      fsSync.lstatSync(source).isSymbolicLink() &&
+      fsSync.statSync(source).isDirectory()
+    ) {
+      // Node's link handler creates privileged directory symlinks; junctions need no elevation.
+      const target = path.resolve(path.dirname(source), fsSync.readlinkSync(source));
+      fsSync.symlinkSync(target, destination, "junction");
+      return false;
+    }
+    return true;
+  };
   try {
     for (const { sourceRoot, destinationRoot: destination } of roots) {
       // .artifacts may point at another volume. A sibling of each destination
@@ -305,8 +321,8 @@ export async function prepareGitRuntimePromotion(
         recursive: true,
         preserveTimestamps: true,
         verbatimSymlinks: true,
-        // An unused filter prevents Node from using its native directory-copy path.
-        filter: disposableCaches.size > 0 ? (source) => !disposableCaches.has(source) : undefined,
+        // A filter keeps Windows junctions out of Node's native directory-copy path.
+        filter: process.platform === "win32" || disposableCaches.size > 0 ? filter : undefined,
       });
       assertDestination?.(destination);
       await relocateRuntimeTree(candidate, sourceRoot, destination, relocations);

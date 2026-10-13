@@ -4,12 +4,14 @@ import path from "node:path";
 import { afterAll, expect, it, vi } from "vitest";
 import { copyTreeCloseOnExec } from "../../test/helpers/close-on-exec-copy.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { resolveMutableUpdateFailure } from "../cli/update-cli/update-command-result.js";
 import { resolveSystemNodeInfo } from "../daemon/runtime-paths.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import * as processExec from "../process/exec.js";
 import { getOrCreatePromise } from "../shared/lazy-promise.js";
 import { pathExists } from "../utils.js";
 import { collectNestedErrorCandidates } from "./error-graph-internal.js";
+import { verifyGitUpdateRecovery } from "./update-git-runtime.js";
 import { UpdateRequesterRevokedError } from "./update-requester-authority.js";
 import { buildUpdateCommandRunner } from "./update-runner-command.js";
 import { prepareGitRuntimePromotion } from "./update-runner-git-runtime.js";
@@ -474,30 +476,36 @@ export function registerGitRuntimeStagingTests(
       await advanceRemote();
       const failure = new Error("candidate canary failed");
       const onStepComplete = vi.fn();
-      await expect(
-        update({
-          progress: {
-            onStepComplete,
-            onStepStart: ({ name }) => {
-              if (failurePoint === "runtime staging" && name === "preflight-cleanup") {
-                expect(onStepComplete).toHaveBeenCalledWith(
-                  expect.objectContaining({
-                    name: "preflight-runtime-stage",
-                    exitCode: 1,
-                    failureFacts: [expect.objectContaining({ check: "preflight-runtime-stage" })],
-                  }),
-                );
-              }
-            },
-          },
-          validateCandidate: async () => {
-            if (failurePoint === "validation") {
-              throw failure;
+      const cause: unknown = await update({
+        progress: {
+          onStepComplete,
+          onStepStart: ({ name }) => {
+            if (failurePoint === "runtime staging" && name === "preflight-cleanup") {
+              expect(onStepComplete).toHaveBeenCalledWith(
+                expect.objectContaining({
+                  name: "preflight-runtime-stage",
+                  exitCode: 1,
+                  failureFacts: [expect.objectContaining({ check: "preflight-runtime-stage" })],
+                }),
+              );
             }
-            vi.spyOn(fs, "cp").mockRejectedValueOnce(failure);
           },
-        }),
-      ).rejects.toBe(failure);
+        },
+        validateCandidate: async () => {
+          if (failurePoint === "validation") {
+            throw failure;
+          }
+          vi.spyOn(fs, "cp").mockRejectedValueOnce(failure);
+        },
+      }).catch((error: unknown) => error);
+      const { result } = await resolveMutableUpdateFailure({
+        cause,
+        durationMs: 0,
+        mode: "git",
+        root,
+        originalRecovery: () => verifyGitUpdateRecovery({ root, sha: beforeSha }),
+      });
+      expect(result.recovery).toMatchObject({ serviceRestartSafe: true, buildId: beforeSha });
       expect(isStopped()).toBe(false);
       expect(await git(root, "rev-parse", "HEAD")).toBe(beforeSha);
       expect(await fs.readFile(path.join(root, "node_modules", "identity.cjs"), "utf8")).toContain(
