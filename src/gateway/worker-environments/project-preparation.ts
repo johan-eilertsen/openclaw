@@ -381,7 +381,6 @@ export function createWorkerProjectPreparation(params: {
             ...preparationInput,
             timeoutMs,
             verifiedRetained,
-            reportDiagnostics: true,
           }),
         signal,
       ),

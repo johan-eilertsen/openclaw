@@ -742,24 +742,23 @@ ${action}
       const seed = f.operation();
       await seed.project.prepare(f);
       seed.close();
-      const input = {
-        namespace: "gateway",
-        seedKey: workerProjectSeedKey(f.project),
-        preparationKey: "a".repeat(64),
-        cacheKey: "c".repeat(64),
-        baseCommit: f.project.baseCommit,
-        setupRecipe: (await readWorkerProjectEnvironmentRecipe(f.project)).identity,
-        timeoutMs,
-      };
-      await expect(f.runScript(createProjectSetupScript(input))).rejects.toMatchObject({
-        stderr: expect.stringMatching(error),
-      });
+      const operation = await f.preparedOperation();
+      try {
+        await expect(
+          operation.project.prepare({
+            ...f,
+            runScriptWithBudget: (createScript) => f.runScript(createScript(timeoutMs)),
+          }),
+        ).rejects.toThrow(error);
+      } finally {
+        operation.close();
+      }
       const home = path.join(
         f.home,
         ".openclaw-worker",
         "prepared",
         "gateway",
-        input.cacheKey,
+        "c".repeat(64),
         "home",
       );
       const files = await fs.readdir(home);

@@ -319,7 +319,6 @@ export function createProjectSetupScript(
     setupRecipe?: string;
     runSetupScript?: boolean;
     recipe?: EnvironmentRecipe;
-    reportDiagnostics?: boolean;
     timeoutMs?: number;
     verifiedRetained?: PreparedProjectVerification | null;
   },
@@ -329,7 +328,6 @@ export function createProjectSetupScript(
 node <<'PROJECT_SETUP_SCRIPT'
 (${PREPARE_PROJECT_WORKSPACE_JS})(${JSON.stringify(input)}, ${inspectOnly})
   .then((result) => {
-    if (result?.setupFailure && ${JSON.stringify(input.reportDiagnostics !== true)}) throw new Error(result.setupFailure + (result.recipePreparation?.failure?.outputTail ? ": " + result.recipePreparation.failure.outputTail : ""));
     process.stdout.write(JSON.stringify(result ?? null));
   })
   .catch((error) => { console.error(error.message); process.exitCode = 1; });
