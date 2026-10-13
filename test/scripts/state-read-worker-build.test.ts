@@ -11,9 +11,10 @@ const handlersModule = "/src/state/openclaw-state-read-handlers.ts";
 
 describe("state read worker artifacts", () => {
   it.each([
-    ["state/openclaw-state-read.worker", ".js"],
-    ["worker/openclaw-state-read.worker", ".mjs"],
-  ])("keeps unrelated handlers out of %s startup", async (entryName, extension) => {
+    ["state/openclaw-state-read.worker", ".js", handlersModule],
+    ["worker/openclaw-state-read.worker", ".mjs", handlersModule],
+    ["infra/sqlite-readonly-location.worker", ".js", "/src/state/openclaw-state-read-snapshot.ts"],
+  ])("keeps unrelated handlers out of %s startup", async (entryName, extension, deferredModule) => {
     const selected = configs.find(
       (config) =>
         typeof config.entry === "object" &&
@@ -64,12 +65,12 @@ describe("state read worker artifacts", () => {
           }
         }
       }
-      expect([...startupModules].some((id) => id.endsWith(handlersModule))).toBe(false);
+      expect([...startupModules].some((id) => id.endsWith(deferredModule))).toBe(false);
       expect(
         [...chunks.values()].some((chunk) =>
           Object.entries(chunk.modules).some(
             ([id, module]) =>
-              module.renderedLength > 0 && id.replaceAll("\\", "/").endsWith(handlersModule),
+              module.renderedLength > 0 && id.replaceAll("\\", "/").endsWith(deferredModule),
           ),
         ),
       ).toBe(true);

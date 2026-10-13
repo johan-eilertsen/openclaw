@@ -34,12 +34,27 @@ import type {
   OpenClawStateReadOutcome,
   OpenClawStateReadOptions,
   OpenClawStateReadRequest,
+  OpenClawStateReadReply,
 } from "./openclaw-state-read.types.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 import {
   hydrateOpenClawStateWorkerError,
   retainOpenClawStateWorkerErrorPayload,
 } from "./openclaw-state-worker-error.js";
+
+export function decodeOpenClawStateReadReply(
+  reply: OpenClawStateReadReply,
+): OpenClawStateReadOutcome {
+  if (reply.ok) {
+    return { value: reply };
+  }
+  const error = new Error(reply.message);
+  retainOpenClawStateWorkerErrorPayload(error, reply.error);
+  return {
+    error: hydrateOpenClawStateWorkerError(error, { includeOrdinary: true }),
+    sourceAdmitted: reply.sourceAdmitted === true,
+  };
+}
 
 type ReadOperation = { service(): void; close(): Promise<void> };
 type ReadRuntime = {
@@ -330,16 +345,7 @@ function createReadTransport(
         }
         const reply = read.value;
         cleanup.retire = retireAfterRead || Boolean(reply.nativeCleanupFailure);
-        if (reply.ok) {
-          outcome = { value: reply };
-        } else {
-          const error = new Error(reply.message);
-          retainOpenClawStateWorkerErrorPayload(error, reply.error);
-          outcome = {
-            error: hydrateOpenClawStateWorkerError(error, { includeOrdinary: true }),
-            sourceAdmitted: reply.sourceAdmitted === true,
-          };
-        }
+        outcome = decodeOpenClawStateReadReply(reply);
       } catch (error) {
         outcome = { error };
       }

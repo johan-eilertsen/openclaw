@@ -152,9 +152,7 @@ Async config validation requests metadata when a rule or default needs it. Core-
 
 When metadata is needed, preparation reads the machine-owned bundled-discovery policy and installed index together through the shared-state read worker. That worker loads other command handlers only when requested. Later reads reuse the plugin cache until its owner refreshes it. Private inspection snapshots keep their own policy facts without replacing the live process cache.
 
-Promise-only metadata preparation retains one read-only child for snapshot allocation, copying, and retirement. The shared-state worker reads the private bytes; no staging worker or spawn broker starts for that preparation. Existing prepared snapshots are reused, and source files remain unchanged.
-
-It reuses a running shared-state reader when available. Cold promise-only reads start a direct worker through that same owner, without a native-lifetime supervisor thread. Standalone inspection joins its exit before loading manifests; maintenance retains it for subsequent reads within that operation. Readers that need synchronous servicing retain their transport and cleanup contract.
+Cold promise-only metadata preparation retains one read-only child for snapshot allocation, copying, and retirement. A shared-state worker inside that child admits the source and reads the private bytes. It exits before the child retires its snapshot, keeping SQL off the CLI thread without loading a separate reader into the CLI process. Source files remain unchanged. Existing prepared snapshots, live native readers, and schema-maintenance scopes retain their existing read and ownership paths. Readers that need synchronous servicing retain their transport and cleanup contract.
 
 Channel setup catalogs retain the requested workspace and load-path scope, including raw plugin shadows, so trust filtering can select the appropriate installed alternative.
 
