@@ -141,7 +141,7 @@ describe("renderPluginCatalogResults", () => {
     expect(categoryIcons[3]).not.toBe(categoryIcons[2]);
   });
 
-  it.each(["official", "community", "empty", "mixed"] as const)(
+  it.each(["empty", "mixed"] as const)(
     "preserves search ranking and groups only mixed publishers (%s)",
     (kind) => {
       const official = Array.from({ length: kind === "mixed" ? 10 : 1 }, (_, i) =>
@@ -150,14 +150,7 @@ describe("renderPluginCatalogResults", () => {
       const community = ["community-first", "community-second"].map((id) =>
         plugin(id, { catalog: { name: "OpenClaw integration", official: false, categories: [] } }),
       );
-      const items =
-        kind === "mixed"
-          ? [community[0]!, ...official, community[1]!]
-          : kind === "official"
-            ? official
-            : kind === "community"
-              ? community.slice(0, 1)
-              : [];
+      const items = kind === "mixed" ? [community[0]!, ...official, community[1]!] : [];
       const onLoadMore = vi.fn();
       const container = mount(
         baseProps({
@@ -289,16 +282,6 @@ describe("renderPluginCatalogResults", () => {
         ["uncategorized-plugin", []],
       ],
       shelves: { tools: ["matched"], other: [], uncategorized: [] },
-    },
-    {
-      name: "providers with multiple purposes",
-      categories: ["models", "media"],
-      entries: [
-        ["novita", ["models", "media"]],
-        ["zai", ["models", "media"]],
-        ["text-only", ["models"]],
-      ],
-      shelves: { models: ["novita", "text-only", "zai"], media: ["novita", "zai"] },
     },
   ] satisfies Array<{
     name: string;

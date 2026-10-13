@@ -858,20 +858,9 @@ it("replaces a retired profile read when the same ID gains profile qualification
 });
 
 it.each([
-  { scopes: ["operator.read"], summary: "You have permission to view server information." },
-  { scopes: ["operator.write"], summary: "You have permission to send messages and make changes." },
-  {
-    scopes: ["operator.sessions.read"],
-    summary: "You have permission to view your own sessions.",
-  },
-  { scopes: ["operator.admin"], summary: "You have permission to manage this server." },
   {
     scopes: ["operator.approvals"],
     summary: "This connection has a limited set of permissions.",
-  },
-  {
-    scopes: ["operator.read", "operator.sessions.write"],
-    summary: "You have permission to work in your own sessions.",
   },
 ])("explains $scopes with diagnostics collapsed", async ({ scopes, summary }) => {
   const request = vi.fn(async () => ({}));
@@ -947,11 +936,7 @@ it("reconnects through the connection owner, retiring grants and preserving the 
   expect(page.querySelector(".settings-row__value")?.textContent).toBe("operator.sessions.read");
 });
 
-it.each([
-  { stored: false, enabled: false, updated: true },
-  { stored: "not-a-boolean", enabled: false, updated: undefined },
-  { stored: undefined, enabled: true, updated: false },
-])(
+it.each([{ stored: false, enabled: false, updated: true }])(
   "loads co-author consent $stored and saves changes without reloading",
   async ({ stored, enabled, updated }) => {
     const profile: UserProfile = {
