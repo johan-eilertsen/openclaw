@@ -86,7 +86,8 @@ const isWorkerBuildConfig = (config: TsdownConfig) =>
   (typeof config.entry === "object" &&
     config.entry !== null &&
     !Array.isArray(config.entry) &&
-    Object.keys(config.entry).some((name) => name.startsWith("worker/")));
+    Object.keys(config.entry).length > 0 &&
+    Object.keys(config.entry).every((name) => name.startsWith("worker/")));
 
 function findWorkerBuildConfig(target: string) {
   const selected = workerBuildTargets.find(([name]) => name === target);
