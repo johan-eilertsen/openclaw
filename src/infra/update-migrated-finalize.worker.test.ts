@@ -73,6 +73,7 @@ vi.mock("../cli/update-cli/update-command-windows-task.js", () => ({
 vi.mock("../state/openclaw-state-db.js", () => ({
   closeOpenClawStateDatabaseAsync: fixture.close,
 }));
+// mock-isolation: Finalizer fixtures observe cleanup without closing the test process's native workers.
 vi.mock("./worker-native-lifecycle.js", () => ({
   closeDefaultRetainedNativeWorkerSource: fixture.closeNative,
 }));
