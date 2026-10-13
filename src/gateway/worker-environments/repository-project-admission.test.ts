@@ -199,12 +199,15 @@ describe("repository project admission", () => {
     ];
     blobs[packageBlob] = '{ "packageManager": "yarn@4.0.0" }';
     const result = await prepareRepositoryWorkerProjectSource(initial);
-    expect(result.setupRecipe).toMatch(/^[a-f0-9]{64}$/u);
-    expect(result.recipe).toMatchObject({
+    const identity = "d66a6ba34bd261aca84e16d556a81df1d3c3105fa71ad1a175af1be237a8412a";
+    expect(result.setupRecipe).toBe(identity);
+    expect(result.recipe).toEqual({
       source: "detected",
-      identity: result.setupRecipe,
+      identity,
       inputs: { "yarn.lock": lock, "package.json": packageBlob },
-      detectedInstall: ["yarn", "install", "--immutable"],
+      env: { COREPACK_ENABLE_AUTO_PIN: "0" },
+      detectedInstall:
+        'mkdir -p "$HOME/.local/bin" && corepack enable --install-directory "$HOME/.local/bin" && PATH="$HOME/.local/bin:$PATH" yarn install --immutable',
     });
     expect(requestPaths().filter((path) => path.includes("/git/blobs/"))).toEqual([
       `/repos/acme/project/git/blobs/${packageBlob}`,
