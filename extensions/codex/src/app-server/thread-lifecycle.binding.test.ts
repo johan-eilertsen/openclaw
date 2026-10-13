@@ -1648,6 +1648,12 @@ describe("Codex app-server thread lifecycle bindings", () => {
   it.each([
     { change: "policy", policy: "generic policy v2", skills: "## OpenClaw Skills\n\nweather" },
     { change: "skills", policy: "generic policy", skills: undefined },
+    { change: "compaction", policy: "generic policy", skills: "## OpenClaw Skills\n\nweather" },
+    {
+      change: "compaction-scope",
+      policy: "generic policy",
+      skills: "## OpenClaw Skills\n\nweather",
+    },
   ] as const)(
     "refreshes live incognito instructions but refuses generic policy drift ($change: $skills)",
     async ({ change, policy, skills }) => {
@@ -1689,8 +1695,19 @@ describe("Codex app-server thread lifecycle bindings", () => {
         ...common,
         developerInstructions: "generic policy",
         refreshableInstructions: firstSkills,
+        ...(change === "compaction-scope"
+          ? {
+              config: {
+                model_auto_compact_token_limit: 120_000,
+                model_auto_compact_token_limit_scope: "body_after_prefix",
+              },
+            }
+          : {}),
       });
       expect(first.liveThreadEphemeralPolicy).toEqual({
+        ...(change === "compaction-scope"
+          ? { autoCompactTokenLimit: 120_000, autoCompactTokenLimitScope: "body_after_prefix" }
+          : {}),
         developerInstructions: "generic policy",
         refreshableInstructions: firstSkills,
         // Creation carries the catalog natively, so compaction restores this one.
@@ -1718,9 +1735,19 @@ describe("Codex app-server thread lifecycle bindings", () => {
         ...common,
         developerInstructions: policy,
         refreshableInstructions: skills,
+        ...(change === "compaction"
+          ? { config: { model_auto_compact_token_limit: 260_000 } }
+          : change === "compaction-scope"
+            ? {
+                config: {
+                  model_auto_compact_token_limit: 120_000,
+                  model_auto_compact_token_limit_scope: "total",
+                },
+              }
+            : {}),
       };
 
-      if (change === "policy") {
+      if (change === "policy" || change === "compaction" || change === "compaction-scope") {
         await expect(startOrResumeThread(secondTurn)).rejects.toBeInstanceOf(
           CodexIncognitoPolicyChangeError,
         );

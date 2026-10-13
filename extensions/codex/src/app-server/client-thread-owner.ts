@@ -20,6 +20,8 @@ export type ThreadReleaseTransition = {
  * share one refreshable section recording what was last delivered to the thread.
  */
 export type CodexEphemeralThreadPolicy = {
+  autoCompactTokenLimit?: number;
+  autoCompactTokenLimitScope?: string;
   developerInstructions?: string;
   refreshableInstructions?: string;
   /**
@@ -181,11 +183,20 @@ export function revertRetainedThreadInstructions(
 export function createCodexEphemeralThreadPolicy({
   developerInstructions,
   refreshableInstructions,
-}: Pick<
-  CodexEphemeralThreadPolicy,
-  "developerInstructions" | "refreshableInstructions"
->): CodexEphemeralThreadPolicy {
+  config,
+}: Pick<CodexEphemeralThreadPolicy, "developerInstructions" | "refreshableInstructions"> & {
+  config?: {
+    model_auto_compact_token_limit?: unknown;
+    model_auto_compact_token_limit_scope?: unknown;
+  };
+}): CodexEphemeralThreadPolicy {
   return {
+    ...(typeof config?.model_auto_compact_token_limit === "number"
+      ? { autoCompactTokenLimit: config.model_auto_compact_token_limit }
+      : {}),
+    ...(typeof config?.model_auto_compact_token_limit_scope === "string"
+      ? { autoCompactTokenLimitScope: config.model_auto_compact_token_limit_scope }
+      : {}),
     developerInstructions,
     refreshableInstructions,
     nativeRefreshableInstructions: refreshableInstructions,

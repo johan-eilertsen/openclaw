@@ -13,6 +13,7 @@ import {
   isCodexAppServerLiveThreadClaimed,
   isCodexAppServerLiveThreadProtected,
   releaseCodexAppServerLiveThread,
+  readCodexLiveThreadEphemeralPolicy,
 } from "./client-runtime.js";
 import type { CodexAppServerClient } from "./client.js";
 import {
@@ -221,6 +222,17 @@ export async function tryReuseCodexLiveThread(
     throwIfAborted,
   } = options;
   const incognito = isIncognitoSessionKey(params.params.sessionKey);
+  const creationPolicy = incognito
+    ? readCodexLiveThreadEphemeralPolicy(params.client, binding.threadId)
+    : undefined;
+  if (
+    incognito &&
+    (creationPolicy?.autoCompactTokenLimit !== params.config?.model_auto_compact_token_limit ||
+      creationPolicy?.autoCompactTokenLimitScope !==
+        params.config?.model_auto_compact_token_limit_scope)
+  ) {
+    throw new CodexIncognitoPolicyChangeError("compaction settings");
+  }
 
   // These native-owned ephemeral lifetimes do not enter ordinary
   // configuration ownership. Keep their existing live-only continuation path.
@@ -338,12 +350,14 @@ export async function tryReuseCodexLiveThread(
     assertWarmOwner();
     if (binding.preserveNativeModel || binding.connectionScope === "supervision") {
       try {
-        nativeThread = await assertAdoptedCodexThreadResumeAllowed(
-          params,
-          binding.threadId,
-          options,
-          assertWarmOwner,
-        );
+        nativeThread =
+          options.admittedNativeThread ??
+          (await assertAdoptedCodexThreadResumeAllowed(
+            params,
+            binding.threadId,
+            options,
+            assertWarmOwner,
+          ));
       } catch (error) {
         // This read-only preflight cannot change native configuration. Direct-input
         // refusals and failed reads preserve it too, but revocation or cancellation cannot.
