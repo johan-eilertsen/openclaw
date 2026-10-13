@@ -229,6 +229,14 @@ describe("registered Codex harness model attribution", () => {
     params.onAgentEvent = (event) => {
       events.push(event);
     };
+    let turnAccepted = createDeferred<void>();
+    const onExecutionPhase = params.onExecutionPhase;
+    params.onExecutionPhase = (event) => {
+      onExecutionPhase?.call(params, event);
+      if (event.phase === "turn_accepted") {
+        turnAccepted.resolve();
+      }
+    };
     const modelEvents = () =>
       events.filter((event) => event.stream === "lifecycle" && event.data.phase === "model");
     const readyModelEvent = {
@@ -246,6 +254,13 @@ describe("registered Codex harness model attribution", () => {
         turnStarted.promise,
         run.then((result) => {
           throw new Error("Attempt ended before turn/start", { cause: result });
+        }),
+      ]);
+      // Wire dispatch precedes acceptance and lifecycle publication.
+      await Promise.race([
+        turnAccepted.promise,
+        run.then((result) => {
+          throw new Error("Attempt ended before turn acceptance", { cause: result });
         }),
       ]);
       await vi.waitFor(() => expect(modelEvents()).toEqual([readyModelEvent]), fastWait);
@@ -305,11 +320,18 @@ describe("registered Codex harness model attribution", () => {
       }
       nativeModel = "changed-native-model";
       turnStarted = createDeferred<void>();
+      turnAccepted = createDeferred<void>();
       next = registered.runAttempt({ ...params, runId: "native-second-turn" });
       await Promise.race([
         turnStarted.promise,
         next.then((earlyResult) => {
           throw new Error("Second attempt ended before turn/start", { cause: earlyResult });
+        }),
+      ]);
+      await Promise.race([
+        turnAccepted.promise,
+        next.then((earlyResult) => {
+          throw new Error("Second attempt ended before turn acceptance", { cause: earlyResult });
         }),
       ]);
       transport.send({

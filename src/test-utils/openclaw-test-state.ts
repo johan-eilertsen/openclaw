@@ -8,7 +8,7 @@ import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import * as configRuntime from "../config/runtime-snapshot.js";
 import { GATEWAY_STARTUP_MUTATED_ENV_KEYS } from "../gateway/test-helpers.env.js";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
-import { captureEnv, withEnv } from "./env.js";
+import { captureEnv, withEnvAsync } from "./env.js";
 import { cleanupSessionStateForTest } from "./session-state-cleanup.js";
 
 type ConfigRuntimeResettable = typeof configRuntime & {
@@ -348,15 +348,32 @@ export async function createOpenClawTestState(
             import("../agents/auth-profiles/store.js"),
             import("../agents/auth-profiles/external-auth.js"),
           ]);
-        const { saveAuthProfileStore } = createAuthProfileStoreRuntime(
+        const { updateAuthProfileStoreWithLock } = createAuthProfileStoreRuntime(
           createExternalAuthRuntime(() => []),
         );
-        withEnv(env, () =>
-          saveAuthProfileStore(store as AuthProfileStore, targetAgentDir, {
-            filterExternalAuthProfiles: false,
-            syncExternalCli: false,
+        const seeded = await withEnvAsync(env, () =>
+          updateAuthProfileStoreWithLock({
+            agentDir: targetAgentDir,
+            stateDir: paths.stateDir,
+            saveOptions: { filterExternalAuthProfiles: false, syncExternalCli: false },
+            updater: (current) => {
+              const replacement = structuredClone(store as AuthProfileStore);
+              current.version = replacement.version;
+              current.profiles = replacement.profiles;
+              current.order = replacement.order;
+              current.lastGood = replacement.lastGood;
+              current.usageStats = replacement.usageStats;
+              current.runtimePersistedProfileIds = replacement.runtimePersistedProfileIds;
+              current.runtimeExternalProfileIds = replacement.runtimeExternalProfileIds;
+              current.runtimeExternalProfileIdsAuthoritative =
+                replacement.runtimeExternalProfileIdsAuthoritative;
+              return true;
+            },
           }),
         );
+        if (!seeded) {
+          throw new Error("Failed to seed isolated auth profile store");
+        }
         return resolveAuthProfileDatabasePath(targetAgentDir);
       },
       applyEnv: () => {

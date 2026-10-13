@@ -1,15 +1,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
-  clearRuntimeAuthProfileStoreSnapshots,
-  saveAuthProfileStore,
-} from "openclaw/plugin-sdk/agent-runtime";
+import { clearRuntimeAuthProfileStoreSnapshots } from "openclaw/plugin-sdk/agent-runtime";
 import {
   capturePluginRegistration,
   createRuntimeEnv,
   resolveProviderPluginChoice,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
+import { updateAuthProfileStoreWithLock } from "openclaw/plugin-sdk/provider-auth";
 import {
   getProviderHttpMocks,
   installProviderHttpMockCleanup,
@@ -157,20 +155,19 @@ describe("alibaba video generation provider", () => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-alibaba-wan-auth-"));
 
     try {
-      saveAuthProfileStore(
-        {
-          version: 1,
-          profiles: {
-            "alibaba:standard": {
-              type: "api_key",
-              provider: "alibaba",
-              key: profileKey,
-            },
-          },
-        },
+      const seeded = await updateAuthProfileStoreWithLock({
         agentDir,
-        { filterExternalAuthProfiles: false, syncExternalCli: false },
-      );
+        saveOptions: { filterExternalAuthProfiles: false, syncExternalCli: false },
+        updater: (store) => {
+          store.profiles["alibaba:standard"] = {
+            type: "api_key",
+            provider: "alibaba",
+            key: profileKey,
+          };
+          return true;
+        },
+      });
+      expect(seeded).not.toBeNull();
 
       expect(await alibabaVideoGenerationProvider.isConfiguredAsync?.({ cfg: {}, agentDir })).toBe(
         expected,
