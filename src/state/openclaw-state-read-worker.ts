@@ -367,8 +367,8 @@ function createReadTransport(
         command: { ...readCommand },
       };
       const pool = readPool(state, ownsAdmission(), awaitedOnly);
-      // Keep admission and its read together, then release the cold isolate before metadata loads.
-      retireAfterRead = !pool.retained && readCommand.type !== "admit";
+      // Maintenance reuses this reader; standalone inspection releases it before metadata loads.
+      retireAfterRead = !pool.retained && !context.maintenanceScope && readCommand.type !== "admit";
       task = startReadTask(
         pool,
         () => {

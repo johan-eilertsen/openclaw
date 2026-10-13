@@ -148,13 +148,13 @@ One `PluginCache` starts on the first plugin metadata access, including CLI pref
 
 Plugin-aware config validation, startup auto-enable, and Gateway plugin bootstrap consume that snapshot instead of rebuilding manifest/index metadata independently. `PluginLookUpTable` is derived from the same snapshot and adds the startup plugin plan for the current runtime config.
 
-Async config validation requests metadata when a rule or default needs it. Core-only settings do not load the plugin inventory; `config get` also uses core schema and secret hints for paths outside the plugin and channel namespaces. Native-catalog privacy preferences still receive their plugin schema checks.
+Async config validation requests metadata when a rule or default needs it. Core-only settings do not load the plugin inventory; successful `config get` uses core redaction hints outside plugin, channel, and agent configuration, building the JSON schema only for missing-path diagnostics. Agent configuration keeps provider model-parameter schemas from plugins. Native-catalog privacy preferences still receive their plugin schema checks.
 
 When metadata is needed, preparation reads the machine-owned bundled-discovery policy and installed index together through the shared-state read worker. That worker loads other command handlers only when requested. Later reads reuse the plugin cache until its owner refreshes it. Private inspection snapshots keep their own policy facts without replacing the live process cache.
 
 Promise-only metadata preparation retains one read-only child for snapshot allocation, copying, and retirement. The shared-state worker reads the private bytes; no staging worker or spawn broker starts for that preparation. Existing prepared snapshots are reused, and source files remain unchanged.
 
-It reuses a running shared-state reader when available. Cold promise-only reads start a direct worker through that same owner, without a native-lifetime supervisor thread, and join its exit before loading manifests. Readers that need synchronous servicing retain their transport and cleanup contract.
+It reuses a running shared-state reader when available. Cold promise-only reads start a direct worker through that same owner, without a native-lifetime supervisor thread. Standalone inspection joins its exit before loading manifests; maintenance retains it for subsequent reads within that operation. Readers that need synchronous servicing retain their transport and cleanup contract.
 
 Channel setup catalogs retain the requested workspace and load-path scope, including raw plugin shadows, so trust filtering can select the appropriate installed alternative.
 

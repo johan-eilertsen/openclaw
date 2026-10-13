@@ -131,8 +131,8 @@ export async function runConfigGet(opts: { path: string; json?: boolean; runtime
     const parsedPath = parseConfigSetPath(opts.path);
     const { readConfigFileSnapshotWithPluginMetadata } = await import("../config/config.js");
     const { ensureValidConfigSnapshotForCli } = await import("./config-cli-validation.js");
-    // Plugin schemas and secret hints only extend these namespaces.
-    const needsPluginSchema = parsedPath[0] === "plugins" || parsedPath[0] === "channels";
+    // Plugins also extend provider model parameters within agent configuration.
+    const needsPluginSchema = ["plugins", "channels", "agents"].includes(parsedPath[0] ?? "");
     const read = await readConfigFileSnapshotWithPluginMetadata({
       observe: false,
       completePluginMetadata: needsPluginSchema,
@@ -143,15 +143,21 @@ export async function runConfigGet(opts: { path: string; json?: boolean; runtime
       throw new Error("Config plugin metadata unavailable; refusing to display config values.");
     }
     const { redactConfigObject } = await import("../config/redact-snapshot.js");
-    const { schema, uiHints } =
+    const runtimeSchema =
       needsPluginSchema && pluginMetadataSnapshot
         ? (await import("../config/runtime-schema.js")).buildRuntimeConfigSchemaFromRegistry(
             pluginMetadataSnapshot.manifestRegistry,
             snapshot.sourceConfig,
           )
-        : (await import("../config/schema.js")).buildConfigSchemaCore();
+        : undefined;
+    const uiHints =
+      runtimeSchema?.uiHints ??
+      (await import("../config/schema-base.js")).computeBaseConfigUiHints();
     const res = getAtPath(redactConfigObject(snapshot.config, uiHints), parsedPath);
     if (!res.found || res.value === undefined) {
+      const schema =
+        runtimeSchema?.schema ??
+        (await import("../config/schema.js")).buildConfigSchemaCore().schema;
       const autoManaged = AUTO_MANAGED_CONFIG_META_PATHS.some(
         (managedPath) =>
           parsedPath.every((segment, index) => managedPath[index] === segment) ||
