@@ -43,6 +43,9 @@ describe("model catalog invalid cost isolation", () => {
       for (const id of ["partial", "null", "wrong-type"]) {
         expect(registry.getError()).toContain(`Skipped model ${provider}/${id}: invalid cost.`);
       }
+      expect(registry.getError()).toContain(
+        `Fix or remove its cost block in ${source === "authored" ? "/synthetic/models.json" : "the provider's catalog source"}, then refresh the model catalog.`,
+      );
       expect(registry.fork(AuthStorage.inMemory()).getAll()).toEqual(registry.getAll());
     },
   );
@@ -80,5 +83,43 @@ describe("model catalog invalid cost isolation", () => {
     expect(registry.getAll()).toEqual([]);
     expect(registry.getError()).toContain("Invalid models.json schema");
     expect(registry.getError()).toContain(path);
+  });
+
+  describe.each(["authored", "generated"])("%s catalog semantic validation", (source) => {
+    it.each([
+      { model: { contextWindow: 0 }, api: "openai-completions", error: "invalid contextWindow" },
+      { model: { contextWindow: -1 }, api: "openai-completions", error: "invalid contextWindow" },
+      { model: { maxTokens: 0 }, api: "openai-completions", error: "invalid maxTokens" },
+      { model: { maxTokens: -1 }, api: "openai-completions", error: "invalid maxTokens" },
+      { model: {}, api: undefined, error: 'no "api" specified. Set at provider or model level.' },
+    ])("preserves $error with invalid pricing ($model)", ({ model, api, error }) => {
+      const contents = JSON.stringify({
+        generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+        providers: {
+          fixture: {
+            api,
+            baseUrl: "https://models.example/v1",
+            models: [
+              { id: "healthy", api: "openai-completions" },
+              { id: "bad", cost: null, ...model },
+            ],
+          },
+        },
+      });
+      const registry = ModelRegistry.fromCapturedSources(
+        AuthStorage.inMemory(),
+        "/synthetic/models.json",
+        {
+          modelsJsonContents: source === "authored" ? contents : '{"providers":{}}',
+          pluginCatalogs: source === "generated" ? [{ pluginId: "fixture", contents }] : [],
+          pluginMetadataSnapshot: pluginOwnerSnapshot("fixture", "fixture"),
+        },
+      );
+
+      expect(registry.getAll()).toEqual([]);
+      expect(registry.getError()).toBe(
+        `Failed to load models.json: Provider fixture, model bad: ${error}\n\nFile: ${source === "authored" ? "/synthetic/models.json" : "sqlite:plugin-model-catalog/fixture"}`,
+      );
+    });
   });
 });
