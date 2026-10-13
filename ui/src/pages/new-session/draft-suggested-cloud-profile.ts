@@ -1,6 +1,9 @@
 import type { DraftGatewayState } from "./draft-gateway-state.ts";
-import type { DraftPlaceCallbacks, DraftPlaceSnapshot } from "./draft-place-contract.ts";
-import type { DraftPlaceState } from "./draft-place-state.ts";
+import type {
+  DraftCloudProfileSelection,
+  DraftPlaceCallbacks,
+  DraftPlaceSnapshot,
+} from "./draft-place-contract.ts";
 import { environmentCloudDisabledReason } from "./hosted-environments.ts";
 
 export class DraftSuggestedCloudProfile {
@@ -8,7 +11,7 @@ export class DraftSuggestedCloudProfile {
 
   constructor(
     private readonly gateway: DraftGatewayState,
-    private readonly place: DraftPlaceState,
+    private readonly place: DraftCloudProfileSelection,
     private readonly read: () => DraftPlaceSnapshot,
     private readonly callbacks: DraftPlaceCallbacks,
   ) {}

@@ -14,7 +14,8 @@ const configWriteMocks = vi.hoisted(() => ({
   commitGatewayConfigWrite: vi.fn(),
   readConfigFileSnapshotForWrite: vi.fn(),
 }));
-vi.mock("../../plugins/worker-profile-suggestions.js", () => ({
+vi.mock("../../plugins/worker-profile-suggestions.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../plugins/worker-profile-suggestions.js")>()),
   resolveSuggestedWorkerProfile: vi.fn(),
 }));
 vi.mock("../../config/io.js", async (importOriginal) => ({
@@ -31,14 +32,16 @@ vi.mock("../../config/validation.js", async (importOriginal) => ({
   }),
   validateConfigObjectWithPlugins: (config: OpenClawConfig) => ({ ok: true, config, warnings: [] }),
 }));
-vi.mock("../../config/runtime-schema.js", () => ({
+vi.mock("../../config/runtime-schema.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../config/runtime-schema.js")>()),
   loadGatewayRuntimeConfigSchema: () => ({
     schema: { type: "object" },
     uiHints: {},
     version: "test",
   }),
 }));
-vi.mock("../../secrets/runtime.js", () => ({
+vi.mock("../../secrets/runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../secrets/runtime.js")>()),
   prepareSecretsRuntimeSnapshot: async ({ config }: { config: OpenClawConfig }) => ({ config }),
 }));
 vi.mock("./config-write-flow.js", async (importOriginal) => ({

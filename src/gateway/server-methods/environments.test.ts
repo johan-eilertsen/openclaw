@@ -28,7 +28,8 @@ vi.mock("../../infra/device-pairing-store-readonly.js", async (importOriginal) =
   readDevicePairingNodeSnapshot: vi.fn(),
 }));
 
-vi.mock("../../plugins/worker-profile-suggestions.js", () => ({
+vi.mock("../../plugins/worker-profile-suggestions.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../plugins/worker-profile-suggestions.js")>()),
   resolveSuggestedWorkerProfile: vi.fn(async () => undefined),
 }));
 

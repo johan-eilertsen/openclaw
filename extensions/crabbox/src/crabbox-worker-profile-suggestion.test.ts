@@ -9,18 +9,19 @@ const coordinatorConfig = {
   coordinator: "https://coordinator.example.test",
   brokerAuth: "configured",
 };
+const classCatalog = {
+  disposition: "mapped",
+  profiles: [
+    { class: "standard", target: "linux", architecture: "amd64", primary: { vcpu: 8 } },
+    { class: "tiny", target: "windows", architecture: "amd64", primary: { vcpu: 2 } },
+    { class: "small", target: "linux", architecture: "amd64", primary: { vcpu: 4 } },
+  ],
+};
 const catalog = [
   {
     provider: "aws",
     targets: ["linux", "windows"],
-    classCatalog: {
-      disposition: "mapped",
-      profiles: [
-        { class: "standard", target: "linux", architecture: "amd64", primary: { vcpu: 8 } },
-        { class: "tiny", target: "windows", architecture: "amd64", primary: { vcpu: 2 } },
-        { class: "small", target: "linux", architecture: "amd64", primary: { vcpu: 4 } },
-      ],
-    },
+    classCatalog,
   },
 ];
 
@@ -104,7 +105,7 @@ describe("Crabbox suggested cloud profile", () => {
 
   it("requires an advertised Linux class", async () => {
     const { discover } = fixture(coordinatorConfig, [
-      { provider: "aws", targets: ["windows"], classCatalog: catalog[0].classCatalog },
+      { provider: "aws", targets: ["windows"], classCatalog },
     ]);
     expect(await discover({})).toBeUndefined();
   });
