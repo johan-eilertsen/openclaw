@@ -183,11 +183,11 @@ describe("memory search reindex backoff", () => {
         sessionKey,
         messages: [{ role: "user", timestamp: 2, content: "Jade pending marker." }],
       });
-      await manager.sync({ reason: "search" });
+      await manager.sync({ reason: "session-delta" });
       expect(embedding).not.toHaveBeenCalled();
       expect(unqueuedChunks()).toHaveLength(0);
       now += 30_000;
-      await manager.sync({ reason: "search" });
+      await manager.sync({ reason: "session-delta" });
       expect(fixture.provider.embeddedBatchTexts).toHaveLength(2);
       expect(fixture.provider.embeddedBatchTexts).toEqual(
         expect.arrayContaining([
