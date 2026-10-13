@@ -12648,7 +12648,7 @@ describe("ci workflow guards", () => {
         }),
       ).toBe("blacksmith-8vcpu-ubuntu-2404");
     }
-    for (const override of [
+    const smokeRunnerFallbacks: Partial<Parameters<typeof evaluateWorkflowExpression>[1]>[] = [
       { ref: "refs/heads/extended-stable/2026.9.33" },
       { eventName: "pull_request" },
       { matrix: { part_count: 6 } },
@@ -12662,7 +12662,8 @@ describe("ci workflow guards", () => {
       { preflightOutputs: { compatibility_target: "" } },
       { preflightOutputs: {} },
       { preflightOutputs: { compatibility_target: "false", frozen_target: "" } },
-    ] as const) {
+    ];
+    for (const override of smokeRunnerFallbacks) {
       expect(
         evaluateWorkflowExpression(smokeProfileJob["runs-on"], {
           ...smokeRunnerContext,
