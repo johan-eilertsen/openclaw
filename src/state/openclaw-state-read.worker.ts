@@ -25,8 +25,14 @@ serveOwnedWorkerTasks(
     let sourceAdmitted: true | undefined;
     let nativeCleanupFailure: OpenClawStateReadReply["nativeCleanupFailure"];
     try {
+      const leaseReader =
+        input.command.type === "gatewayOwnerLease.read"
+          ? await import("../infra/gateway-owner-lease.worker.js")
+          : undefined;
       const handlers =
-        input.command.type === "admit" || input.command.type === "plugins.metadata.read"
+        input.command.type === "admit" ||
+        input.command.type === "plugins.metadata.read" ||
+        input.command.type === "gatewayOwnerLease.read"
           ? undefined
           : await import("./openclaw-state-read-handlers.js");
       const prepared = handlers?.stateReadRegistry.prepare(input.command.type);
@@ -70,6 +76,19 @@ serveOwnedWorkerTasks(
           );
           return { ok: true, sourceAdmitted: true, ...result };
         }
+        if (command.type === "gatewayOwnerLease.read") {
+          if (!leaseReader) {
+            throw new Error("Gateway owner lease reader is unavailable");
+          }
+          const lease = leaseReader.inspectGatewayOwnerLease(
+            input,
+            () => {
+              sourceAdmitted = true;
+            },
+            command.schemaMaintenance,
+          );
+          return { ok: true, type: command.type, sourceAdmitted: true, lease };
+        }
         if (!handlers) {
           throw new Error("State read command handlers are unavailable");
         }
@@ -79,16 +98,6 @@ serveOwnedWorkerTasks(
               sourceAdmitted = true;
             }),
           );
-        }
-        if (command.type === "gatewayOwnerLease.read") {
-          const lease = handlers.inspectGatewayOwnerLease(
-            input,
-            () => {
-              sourceAdmitted = true;
-            },
-            command.schemaMaintenance,
-          );
-          return { ok: true, type: command.type, sourceAdmitted: true, lease };
         }
         if (command.type === "agentDatabaseRegistry.read") {
           const result = readOpenClawStateReadOnlyLocation(

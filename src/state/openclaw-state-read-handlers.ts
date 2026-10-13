@@ -52,7 +52,6 @@ import { isWorkspaceJournalReadCommand } from "../gateway/worker-environments/pl
 import { listPendingWorkerWorkspaceResultsInDatabase } from "../gateway/worker-environments/placement-workspace-result.js";
 import { executeDevicePairingRead } from "../infra/device-pairing-read.kernel.js";
 import { readExecApprovalsConfigRow } from "../infra/exec-approvals-sqlite.js";
-import { inspectGatewayOwnerLease } from "../infra/gateway-owner-lease.worker.js";
 import { inspectCurrentConversationBindingRecordInDatabase } from "../infra/outbound/current-conversation-bindings.kernel.js";
 import { readOutboundDeliveriesInDatabase } from "../infra/outbound/delivery-queue-storage.kernel.js";
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
@@ -110,7 +109,6 @@ import { readUserProfileCommand } from "./user-profile-read.worker.js";
 export {
   prepareAcpSessionMetadataRead,
   loadSubagentSessionListRunsFromSqlite,
-  inspectGatewayOwnerLease,
   readRegisteredAgentDatabaseRows,
   readStateStream,
   stateReadRegistry,

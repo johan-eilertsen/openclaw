@@ -33,6 +33,12 @@ vi.mock("../plugins/plugin-metadata-state.kernel.js", async (importOriginal) => 
 vi.mock("./openclaw-agent-db-registry.read.js", () => ({
   readRegisteredAgentDatabaseRows: mock.query,
 }));
+vi.mock("../infra/gateway-owner-lease.worker.js", () => ({
+  inspectGatewayOwnerLease: (_source: unknown, onAdmitted: () => void) => {
+    onAdmitted();
+    return undefined;
+  },
+}));
 vi.mock("./openclaw-state-db-read-connection.js", () => ({
   closeRetainedOpenClawStateReadConnections: vi.fn(),
   readOpenClawStateReadOnlyLocation: mock.settle,
@@ -80,6 +86,20 @@ it("reads plugin metadata without loading unrelated command handlers", async () 
     type: "plugins.metadata.read",
     sourceAdmitted: true,
     rows: [{ state_key: "plugins.bundledDiscovery", value_json: '"allowlist"' }],
+  });
+  expect(mock.unrelatedHandlerLoaded).toBe(false);
+});
+
+it("reads the ownership lease without loading unrelated command handlers", async () => {
+  const reply = await mock.handler({
+    ...request,
+    command: { type: "gatewayOwnerLease.read", schemaMaintenance: false },
+  });
+  expect(reply).toEqual({
+    ok: true,
+    type: "gatewayOwnerLease.read",
+    sourceAdmitted: true,
+    lease: undefined,
   });
   expect(mock.unrelatedHandlerLoaded).toBe(false);
 });
