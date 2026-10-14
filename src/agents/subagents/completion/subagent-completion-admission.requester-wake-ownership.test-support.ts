@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { loadPendingSessionDeliveries } from "../../../infra/session-delivery-queue-storage.js";
 import {
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabase,
@@ -10,6 +11,7 @@ import {
   armRequesterWake,
   failedRecords,
   records,
+  reopenCompletionFixtureOwners,
 } from "./subagent-completion-admission.test-helpers.js";
 import { mutateSubagentCompletionInDatabase } from "./subagent-completion-mutation.kernel.js";
 
@@ -20,6 +22,93 @@ export function registerRequesterWakeOwnershipTests({
   database: () => OpenClawStateDatabase;
   persistOwner: (input: ReturnType<typeof records>) => unknown;
 }) {
+  it.each([
+    { name: "ordinary private", private: true, wake: {}, deliver: false },
+    {
+      name: "marker without yield",
+      private: true,
+      wake: { yieldedFinalDeliverable: true },
+      deliver: false,
+    },
+    {
+      name: "legacy unmarked yield",
+      private: true,
+      wake: { afterRequesterYield: true },
+      deliver: false,
+    },
+    {
+      name: "marked yielded continuation",
+      private: true,
+      wake: { afterRequesterYield: true, yieldedFinalDeliverable: true },
+      deliver: true,
+    },
+    {
+      name: "marked rearmed batch",
+      private: true,
+      wake: { requesterYieldBatch: true, rearmGeneration: 1, yieldedFinalDeliverable: true },
+      deliver: true,
+    },
+    {
+      name: "batch without rearm",
+      private: true,
+      wake: { requesterYieldBatch: true, yieldedFinalDeliverable: true },
+      deliver: false,
+    },
+    { name: "ordinary public", private: false, wake: {}, deliver: true },
+    {
+      name: "missing original identity",
+      private: true,
+      wake: {},
+      deliver: false,
+      missingIdentity: true,
+    },
+  ] as const)("keeps original requester and reply policy for $name followup", async (testCase) => {
+    const input = failedRecords("failed", { status: "error" });
+    input.subagent.completionTarget = testCase.private ? "parent" : undefined;
+    const missingIdentity = "missingIdentity" in testCase && testCase.missingIdentity;
+    input.subagent.completionRequesterSessionId = missingIdentity
+      ? undefined
+      : "original-requester";
+    input.subagent.completionRequesterLifecycleRevision = missingIdentity
+      ? undefined
+      : "original-revision";
+    input.subagent.requesterSettleWake = {
+      status: "dispatching",
+      attemptCount: 1,
+      ...testCase.wake,
+    };
+    persistOwner(input);
+    await mutateRequesterCompletionBatch({
+      entries: [input.subagent],
+      operation: {
+        kind: "settle",
+        outcome: { delivered: false, path: "none", error: "requester unavailable" },
+      },
+      assertCurrent: () => {},
+      databaseOptions: { database: getDatabase() },
+    });
+    await reopenCompletionFixtureOwners();
+    expect(
+      loadSubagentRegistryFromSqlite().get(input.subagent.runId)?.requesterSettleWake,
+    ).toBeUndefined();
+    const events = await loadPendingSessionDeliveries(captureOpenClawStateWorkerContext());
+    expect(events).toMatchObject([
+      {
+        kind: "systemEvent",
+        requesterIdentity: {
+          sessionId: missingIdentity ? "" : "original-requester",
+          lifecycleRevision: missingIdentity ? null : "original-revision",
+        },
+        deliver: testCase.deliver,
+      },
+    ]);
+    if (!testCase.deliver) {
+      expect(events[0]?.kind === "systemEvent" && events[0].text).toContain(
+        "Process this result privately",
+      );
+    }
+  });
+
   it.each(["owner", "incarnation"] as const)(
     "reconciles aged cancellation only with known child ownership (missing: %s)",
     (missing) => {
