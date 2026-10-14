@@ -42,6 +42,8 @@ export function readSubagentCompletionQueueReceipt(
       agentId: payload.agentId,
       text: payload.text,
       deliveryContext: payload.deliveryContext,
+      requesterIdentity: payload.requesterIdentity,
+      deliver: payload.deliver,
       idempotencyKey: payload.idempotencyKey,
       maxRetries: payload.maxRetries,
       completionRetention: payload.completionRetention,

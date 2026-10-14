@@ -28,6 +28,17 @@ export async function deliverRestartSentinelEvent(
     assertCurrent,
   });
   assertCurrent();
+  const requesterIdentity = entry.kind === "systemEvent" ? entry.requesterIdentity : undefined;
+  if (
+    requesterIdentity &&
+    (!requesterIdentity.sessionId ||
+      expectedTarget.sessionId !== requesterIdentity.sessionId ||
+      (expectedTarget.lifecycleRevision ?? null) !== requesterIdentity.lifecycleRevision)
+  ) {
+    throw new SessionDeliveryDeadLetteredError(
+      "queued completion original requester is unavailable or replaced",
+    );
+  }
   const message = entry.kind === "systemEvent" ? entry.text : entry.message;
   const deliveryContext =
     entry.kind === "agentTurn" && entry.route
@@ -46,6 +57,9 @@ export async function deliverRestartSentinelEvent(
     source: "restart",
     contextKey: `task:restart-sentinel:${entry.id}`,
     ...(deliveryContext ? { deliveryContext } : {}),
+    ...(entry.kind === "systemEvent" && entry.deliver !== undefined
+      ? { deliver: entry.deliver }
+      : {}),
     expectedTarget,
     assertCurrent,
     onAdopted: async () => {

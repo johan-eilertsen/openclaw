@@ -14,13 +14,23 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { sha256Hex } from "../infra/crypto-digest.js";
 import { getDeliveryQueueEntryStatus } from "../infra/delivery-queue-sqlite.test-support.js";
 import { drainPendingSessionDelivery } from "../infra/session-delivery-queue-recovery.js";
-import { scheduleSessionDelivery } from "../infra/session-delivery-queue-runtime.js";
-import { loadPendingSessionDeliveries } from "../infra/session-delivery-queue-storage.js";
+import {
+  scheduleSessionDelivery,
+  startSessionDeliveryRuntime,
+} from "../infra/session-delivery-queue-runtime.js";
+import {
+  loadPendingSessionDeliveries,
+  loadPendingSessionDelivery,
+} from "../infra/session-delivery-queue-storage.js";
 import { SESSION_DELIVERY_QUEUE_NAME } from "../infra/session-delivery-queue.records.js";
 import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission.js";
 import { extractFirstTextBlock } from "../shared/chat-message-content.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
+import {
+  createGatewaySchedulerClock,
+  createTestGatewayScheduler,
+} from "../test-utils/gateway-scheduler-clock.js";
 import {
   createGatewayConfigPath,
   removeGatewayTempHome,
@@ -31,6 +41,7 @@ import {
   deliverQueuedSessionDelivery,
   settleQueuedSessionDelivery,
 } from "./server-restart-sentinel.js";
+import { loadSessionEntryAsync } from "./session-entry-load.test-support.js";
 import { disconnectGatewayClient, startGatewayWithClient } from "./test-helpers.e2e.js";
 import { buildMockOpenAiResponsesProvider } from "./test-openai-responses-model.js";
 
@@ -147,7 +158,7 @@ afterEach(() => {
 
 describe("blocked subagent completion parent followup", () => {
   it(
-    "reviews failed, timed out, and successful children through the real delivery runtime once",
+    "reviews each child once and rejects a queued completion after its requester resets",
     { timeout: 90_000 },
     async ({ signal }) => {
       const { envSnapshot, tempHome, workspaceDir } = await setupGatewayTempHome({
@@ -156,6 +167,8 @@ describe("blocked subagent completion parent followup", () => {
       const queueContext = captureOpenClawStateWorkerContext();
       let gateway: Awaited<ReturnType<typeof startGatewayWithClient>> | undefined;
       let providerServer: http.Server | undefined;
+      let stopDeliveryRuntime: ReturnType<typeof startSessionDeliveryRuntime> | undefined;
+      let deliveryScheduler: ReturnType<typeof createTestGatewayScheduler> | undefined;
       const requests: ProviderRequest[] = [];
       const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -220,6 +233,10 @@ describe("blocked subagent completion parent followup", () => {
             ),
           ).resolves.toMatchObject({ status: "ok" });
 
+          const requester = expectDefined(
+            (await loadSessionEntryAsync(sessionKey)).entry,
+            "original requester session",
+          );
           const now = Date.now();
           await addSubagentRunForTests(
             createSubagentRunRecord({
@@ -238,6 +255,8 @@ describe("blocked subagent completion parent followup", () => {
               },
               expectsCompletionMessage: true,
               completionTarget: "parent",
+              completionRequesterSessionId: requester.sessionId,
+              completionRequesterLifecycleRevision: requester.lifecycleRevision,
               completion: { required: true, resultText: testCase.result, capturedAt: now },
               // Parent-only completion suppresses direct announce, not the parent's review.
               delivery: {
@@ -311,13 +330,122 @@ describe("blocked subagent completion parent followup", () => {
           ).toHaveLength(1);
         }
         expect(await loadPendingSessionDeliveries(queueContext)).toEqual([]);
+
+        // Hold only the queue's clock; production completion, dispatch and admission
+        // remain real while a native reset replaces the queued event's requester.
+        const clock = createGatewaySchedulerClock(Date.now());
+        deliveryScheduler = createTestGatewayScheduler(clock.clock);
+        stopDeliveryRuntime = startSessionDeliveryRuntime({
+          scheduler: deliveryScheduler,
+          queueContext,
+          log,
+          deliver: (entry) => deliverQueuedSessionDelivery({ deps: {}, entry, queueContext }),
+          onSettled: settleQueuedSessionDelivery,
+        });
+        const sessionKey = "agent:main:blocked-followup-reset-parent";
+        await expect(
+          client.request(
+            "agent",
+            {
+              sessionKey,
+              message: "Prepare for a child completion review. Reply BLOCKED_FOLLOWUP_READY.",
+              idempotencyKey: "blocked-followup-reset-readiness",
+            },
+            { expectFinal: true, signal },
+          ),
+        ).resolves.toMatchObject({ status: "ok" });
+        const requester = expectDefined(
+          (await loadSessionEntryAsync(sessionKey)).entry,
+          "requester before reset",
+        );
+        const requesterIdentity = {
+          sessionId: requester.sessionId,
+          lifecycleRevision: requester.lifecycleRevision ?? null,
+        };
+        const runId = "blocked-followup-reset-child";
+        const now = Date.now();
+        await addSubagentRunForTests(
+          createSubagentRunRecord({
+            runId,
+            childSessionKey: "agent:main:subagent:blocked-followup-reset-child",
+            requesterSessionKey: sessionKey,
+            requesterDisplayKey: sessionKey,
+            requesterAgentId: "main",
+            requesterOrigin: { channel: "webchat", to: sessionKey },
+            task: "Retain the old requester's timed-out findings",
+            createdAt: now - 2_000,
+            endedAt: now - 1_000,
+            outcome: { status: "timeout", error: "worker exceeded its deadline" },
+            expectsCompletionMessage: true,
+            completionTarget: "parent",
+            completionRequesterSessionId: requester.sessionId,
+            completionRequesterLifecycleRevision: requester.lifecycleRevision,
+            completion: {
+              required: true,
+              resultText: "OLD_REQUESTER_PRIVATE_FINDINGS",
+              capturedAt: now,
+            },
+            delivery: { status: "pending", disposition: "intentional_non_delivery", generation: 1 },
+          }),
+        );
+        const subagent = expectDefined(getSubagentRunByRunId(runId), "child before reset");
+        const beforeReset = requests.length;
+        await expect(
+          blockSubagentCompletionDelivery({
+            subagent,
+            reason: DELIVERY_ERROR,
+            context: queueContext,
+          }),
+        ).resolves.toBe(true);
+        const id = sha256Hex(`subagent-completion-blocked:${runId}:generation:1`);
+        expect(await loadPendingSessionDelivery(id, queueContext)).toMatchObject({
+          requesterIdentity,
+          deliver: false,
+        });
+        await expect(
+          client.request("sessions.reset", {
+            key: sessionKey,
+            reason: "new",
+            expectedSessionId: requester.sessionId,
+          }),
+        ).resolves.toMatchObject({ ok: true });
+        const replacement = expectDefined(
+          (await loadSessionEntryAsync(sessionKey)).entry,
+          "requester after reset",
+        );
+        expect({
+          sessionId: replacement.sessionId,
+          lifecycleRevision: replacement.lifecycleRevision ?? null,
+        }).not.toEqual(requesterIdentity);
+        expect(await loadPendingSessionDelivery(id, queueContext)).toMatchObject({
+          requesterIdentity,
+        });
+        await clock.advanceTo(Date.now());
+        await vi.waitFor(
+          () => expect(getDeliveryQueueEntryStatus(SESSION_DELIVERY_QUEUE_NAME, id)).toBe("failed"),
+          { timeout: 15_000, interval: 50 },
+        );
+        expect(requests).toHaveLength(beforeReset);
+        const replacementHistory = await client.request<{ messages: unknown[] }>("chat.history", {
+          sessionKey,
+          limit: 30,
+        });
+        expect(JSON.stringify(replacementHistory.messages)).not.toContain(
+          "OLD_REQUESTER_PRIVATE_FINDINGS",
+        );
+        expect(await loadPendingSessionDeliveries(queueContext)).toEqual([]);
       } finally {
         try {
-          if (gateway) {
-            try {
-              await disconnectGatewayClient(gateway.client);
-            } finally {
-              await gateway.server.close({ reason: "blocked subagent followup proof complete" });
+          try {
+            await stopDeliveryRuntime?.();
+            await deliveryScheduler?.stop();
+          } finally {
+            if (gateway) {
+              try {
+                await disconnectGatewayClient(gateway.client);
+              } finally {
+                await gateway.server.close({ reason: "blocked subagent followup proof complete" });
+              }
             }
           }
         } finally {

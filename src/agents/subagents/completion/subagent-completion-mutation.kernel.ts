@@ -35,10 +35,7 @@ import {
   rowToSubagentRunRecord,
 } from "../registry/subagent-registry.store.codec.js";
 import { writeSubagentRunValuesInDatabase } from "../registry/subagent-registry.store.kernel.js";
-import {
-  subagentRunRowVersion,
-  type SubagentRunSqliteRow,
-} from "../registry/subagent-registry.store.row.js";
+import type { SubagentRunSqliteRow } from "../registry/subagent-registry.store.row.js";
 import {
   loadSubagentRunsForChildSessionFromSqlite,
   readSubagentRun,
@@ -47,7 +44,10 @@ import {
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import { sameRequesterSettleRunIdentity } from "../registry/subagent-requester-settle-identity.js";
 import { compareSubagentRunGeneration } from "../registry/subagent-run-generation.js";
-import { SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION } from "./subagent-completion-instructions.js";
+import {
+  SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION,
+  SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION,
+} from "./subagent-completion-instructions.js";
 import type {
   BlockSubagentCompletionRequest,
   SubagentCompletionMutation,
@@ -73,7 +73,7 @@ const noMutation = (applied: boolean | null): SubagentCompletionMutationResult =
   queueIds: [],
 });
 
-/** Decode on the worker while retaining the committed row's CAS version. */
+/** Decode the committed row on the worker. */
 export function decodeSubagentCompletionRecord(
   row: SubagentRunSqliteRow,
   cleanupHandled?: boolean,
@@ -84,7 +84,6 @@ export function decodeSubagentCompletionRecord(
   );
   return {
     subagent,
-    version: expectDefined(subagentRunRowVersion(row), "subagent completion row version"),
     cleanupHandled,
   };
 }
@@ -210,6 +209,13 @@ function prepareBlockedSubagentCompletion(
     nextAttemptAt: undefined,
     queueId: undefined,
   });
+  // Preserve the admitted reply policy before settlement retires the wake.
+  const wake = subagent.requesterSettleWake;
+  const yieldedFinalDeliverable =
+    wake?.yieldedFinalDeliverable === true &&
+    (wake.afterRequesterYield === true ||
+      (wake.requesterYieldBatch === true && wake.rearmGeneration !== undefined));
+  const privateFollowup = subagent.completionTarget === "parent" && !yieldedFinalDeliverable;
   Object.assign(subagent, { cleanupHandled: false, wakeOnDescendantSettle: undefined });
   if (params.storeReplaced) {
     subagent.requesterSettleWake = undefined;
@@ -242,11 +248,16 @@ function prepareBlockedSubagentCompletion(
         {
           kind: "systemEvent",
           sessionKey: resolveEventSessionKey(subagent.requesterSessionKey),
+          requesterIdentity: {
+            sessionId: subagent.completionRequesterSessionId ?? "",
+            lifecycleRevision: subagent.completionRequesterLifecycleRevision ?? null,
+          },
+          deliver: !privateFollowup,
           ...(subagent.requesterAgentId ? { agentId: subagent.requesterAgentId } : {}),
           text: projectRuntimeContextFragments([
             {
               kind: "runtime-instruction",
-              text: `Subagent completion delivery is blocked. ${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} Review the recorded outcome before continuing; do not blindly repeat work or an update already delivered. Keep internal details private.`,
+              text: `Subagent completion delivery is blocked. ${privateFollowup ? SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION : SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} Review the recorded outcome before continuing; do not blindly repeat work or an update already delivered. Keep internal details private.`,
             },
             {
               kind: "conversation-data",

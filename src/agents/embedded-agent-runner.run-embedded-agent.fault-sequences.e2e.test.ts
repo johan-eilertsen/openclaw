@@ -1,7 +1,7 @@
 // Exercises ordered provider faults through the embedded runner failover boundary.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTextToolResult } from "../../test/helpers/text-tool-result.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ContextEngine } from "../context-engine/types.js";
@@ -70,18 +70,15 @@ vi.mock("./models-config.js", async () => {
 
 type ProductionRunEmbeddedAgent = typeof import("./embedded-agent-runner/run.js").runEmbeddedAgent;
 let runEmbeddedAgentWithPreparedAdmission: ProductionRunEmbeddedAgent;
-let setRuntimeConfigSnapshot: typeof import("../config/runtime-snapshot.js").setRuntimeConfigSnapshot;
-let clearRuntimeConfigSnapshot: typeof import("../config/runtime-snapshot.js").clearRuntimeConfigSnapshot;
 let runWithModelFallback: typeof import("./model-fallback-runner.js").runWithModelFallback;
 let captureRoutingDecisionWork: typeof import("./test-helpers/model-routing-decision-e2e-fixtures.js").captureRoutingDecisionWork;
 let createModelRoutingTestAdmission: typeof import("./test-helpers/model-routing-decision-e2e-fixtures.js").createModelRoutingTestAdmission;
 let ensureAuthProfileStore: typeof import("./auth-profiles/store-runtime.js").ensureAuthProfileStore;
 let saveAuthProfileStore: typeof import("./auth-profiles/store-runtime.js").saveAuthProfileStore;
+let setRuntimeConfigSnapshot: typeof import("../config/config.js").setRuntimeConfigSnapshot;
 
 beforeAll(async () => {
   vi.resetModules();
-  ({ setRuntimeConfigSnapshot, clearRuntimeConfigSnapshot } =
-    await import("../config/runtime-snapshot.js"));
   installEmbeddedRunnerBaseE2eMocks();
   installEmbeddedRunnerFastRunE2eMocks({
     runEmbeddedAttempt: (params) => runEmbeddedAttemptMock(params),
@@ -95,6 +92,7 @@ beforeAll(async () => {
       createResolvedEmbeddedRunnerModel(provider, modelId),
   }));
 
+  ({ setRuntimeConfigSnapshot } = await import("../config/config.js"));
   runEmbeddedAgentWithPreparedAdmission = (await import("./embedded-agent-runner/run.js"))
     .runEmbeddedAgent;
   ({ runWithModelFallback } = await import("./model-fallback-runner.js"));
@@ -105,11 +103,10 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  setRuntimeConfigSnapshot({});
   runEmbeddedAttemptMock.mockReset();
   sleepWithAbortMock.mockClear();
 });
-
-afterEach(() => clearRuntimeConfigSnapshot());
 
 function makeProviderConfig(fallbacks: string[]): OpenClawConfig {
   const provider = (modelIds: string[]) => ({
@@ -296,8 +293,6 @@ async function runScenario(params: {
   config: OpenClawConfig;
   runId: string;
 }): Promise<ScenarioOutcome> {
-  // Direct runner fixtures publish the config normally prepared by Gateway startup.
-  setRuntimeConfigSnapshot(params.config);
   const { replaceSessionEntry } = await import("../config/sessions/session-accessor.js");
   const sessionTarget = {
     agentId: "test",
@@ -407,7 +402,6 @@ async function expectPreparationInvalidationToDropRoutingWork(
     const runId = `route-preparation-${mode}`;
     const config = makeProviderConfig([]);
     const auditConfig = { ...config, logging: { audit: { executionIdentity: true } } };
-    setRuntimeConfigSnapshot(auditConfig);
     writeProfiles(agentDir, { openai: 1 });
     runEmbeddedAttemptMock.mockResolvedValue(
       makeEmbeddedRunnerAttempt({

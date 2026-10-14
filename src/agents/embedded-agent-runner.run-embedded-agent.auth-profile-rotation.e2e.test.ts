@@ -107,8 +107,6 @@ type TestRunEmbeddedAgent = (
   params: Omit<Parameters<ProductionRunEmbeddedAgent>[0], "admittedRunContext">,
 ) => ReturnType<ProductionRunEmbeddedAgent>;
 let runEmbeddedAgent: TestRunEmbeddedAgent;
-let setRuntimeConfigSnapshot: typeof import("../config/runtime-snapshot.js").setRuntimeConfigSnapshot;
-let clearRuntimeConfigSnapshot: typeof import("../config/runtime-snapshot.js").clearRuntimeConfigSnapshot;
 let ensureAuthProfileStore: typeof import("./auth-profiles/store-runtime.js").ensureAuthProfileStore;
 let saveAuthProfileStore: typeof import("./auth-profiles/store-runtime.js").saveAuthProfileStore;
 let createOpenClawDatabaseMaintenanceScope: typeof import("../state/openclaw-state-db-async-lifecycle.js").createOpenClawDatabaseMaintenanceScope;
@@ -117,13 +115,13 @@ let cleanupLogCapture: (() => void) | undefined;
 let resetLoggerFn: typeof import("../logging/logger.js").resetLogger;
 let setLoggerOverrideFn: typeof import("../logging/logger.js").setLoggerOverride;
 let registerAgentHarnessFn: typeof import("./harness/registry.js").registerAgentHarness;
+let setRuntimeConfigSnapshot: typeof import("../config/config.js").setRuntimeConfigSnapshot;
 const originalFetch = globalThis.fetch;
 
 beforeAll(async () => {
   vi.resetModules();
   installRunEmbeddedMocks();
-  ({ setRuntimeConfigSnapshot, clearRuntimeConfigSnapshot } =
-    await import("../config/runtime-snapshot.js"));
+  ({ setRuntimeConfigSnapshot } = await import("../config/config.js"));
   runEmbeddedAgent = wrapRunWithTestPreparedAdmission(
     (await import("./embedded-agent-runner/run.js")).runEmbeddedAgent,
   );
@@ -146,8 +144,6 @@ type RunEmbeddedAgentTestParams = Parameters<typeof runEmbeddedAgent>[0] & {
 async function runEmbeddedAgentInline(
   params: RunEmbeddedAgentTestParams,
 ): Promise<Awaited<ReturnType<typeof runEmbeddedAgent>>> {
-  // Direct runner fixtures publish the config normally prepared by Gateway startup.
-  setRuntimeConfigSnapshot(params.config ?? {});
   const maintenance = createOpenClawDatabaseMaintenanceScope();
   try {
     return await maintenance.run(() =>
@@ -160,6 +156,7 @@ async function runEmbeddedAgentInline(
 }
 
 beforeEach(() => {
+  setRuntimeConfigSnapshot({});
   vi.useRealTimers();
   runEmbeddedAttemptMock.mockReset();
   runEmbeddedAttemptMock.mockImplementation(async () => {
@@ -178,7 +175,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  clearRuntimeConfigSnapshot();
   globalThis.fetch = originalFetch;
   cleanupLogCapture?.();
   cleanupLogCapture = undefined;
