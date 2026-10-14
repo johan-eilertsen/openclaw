@@ -36,6 +36,7 @@ import {
   prepareModelCatalogPublication,
   retainPreparedModelCatalogPublication,
 } from "./prepared-model-runtime.catalog-publication.js";
+import { scheduleNativeCatalogDiscovery } from "./prepared-model-runtime.catalog-scheduling.js";
 import {
   preparedProviderCatalogCredentials,
   prepareRetainedProviderCatalog,
@@ -405,12 +406,7 @@ export async function createFullModelCatalogAccess(
     }
     const previousNative = nativePending;
     let failedProviders: readonly string[] | undefined;
-    const promise = (async () => {
-      await previousNative?.catch(() => undefined);
-      const settledCatalog = readReadyCatalog();
-      if (settledCatalog) {
-        return settledCatalog;
-      }
+    const promise = scheduleNativeCatalogDiscovery(previousNative, readReadyCatalog, async () => {
       await using _ = {
         [Symbol.asyncDispose]: retainPreparedPluginGeneration(params.pluginGeneration),
       };
@@ -535,7 +531,7 @@ export async function createFullModelCatalogAccess(
         throw failures[0]!.error;
       }
       return published.catalog ?? staticCatalog;
-    })()
+    })
       .catch((error: unknown) => {
         attempt.failed(error, failedProviders ?? providerIds, "native");
         if (params.isCurrent() && published.catalog) {
