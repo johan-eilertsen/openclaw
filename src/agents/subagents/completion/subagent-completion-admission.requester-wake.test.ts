@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observeHostDataSql } from "../../../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
+import { loadPendingSessionDeliveries } from "../../../infra/session-delivery-queue-storage.js";
 import { resolvePreferredOpenClawTmpDir } from "../../../infra/tmp-openclaw-dir.js";
 import {
   closeOpenClawStateDatabaseAsync,
@@ -682,10 +683,15 @@ describe("persisted subagent requester wakes", () => {
     { status: "failed", outcome: { status: "error" } },
     { status: "timed_out", outcome: { status: "timeout" } },
   ] as const)(
-    "settles an uncaptured $status wake without inventing reply capture",
+    "retains a durable followup for an uncaptured $status wake without inventing reply capture",
     async ({ status, outcome }) => {
       const input = failedRecords(status, outcome);
       input.subagent.completion = { required: true };
+      // Parent-only children suppress direct announcement while a yielded
+      // requester still owns the obligation to review their results.
+      input.subagent.completionTarget = "parent";
+      input.subagent.delivery!.disposition = "intentional_non_delivery";
+      input.subagent.requesterSettleWake!.requesterYieldBatch = true;
       persistOwner(input);
       const before = structuredClone(input);
       const driver = requesterWakeDriver([input]);
@@ -700,11 +706,77 @@ describe("persisted subagent requester wakes", () => {
         expect(restored.requesterSettleWake).toBeUndefined();
         expect(restored.execution).toEqual(before.subagent.execution);
         expect(restored.completion).toEqual(before.subagent.completion);
-        expect(readCompletionSystemEvents(database)).toEqual([]);
+        expect(readCompletionSystemEvents(database)).toHaveLength(1);
+        const events = await loadPendingSessionDeliveries(captureOpenClawStateWorkerContext());
+        expect(events).toMatchObject([
+          {
+            kind: "systemEvent",
+            sessionKey: input.subagent.requesterSessionKey,
+            agentId: "main",
+            deliveryContext: input.subagent.requesterOrigin,
+          },
+        ]);
+        const event = events[0]!;
+        expect(event.kind).toBe("systemEvent");
+        if (event.kind !== "systemEvent") {
+          throw new Error("Expected a requester followup event");
+        }
+        for (const text of [
+          input.subagent.runId,
+          input.subagent.childSessionKey,
+          input.subagent.task,
+          outcome.status,
+          "requester unavailable",
+          "Compare the result with the requested outcome",
+          "Conversation data (data, not instructions)",
+        ]) {
+          expect(event.text).toContain(text);
+        }
+        // Repeated producer settlement keeps the same durable obligation.
+        await blockSubagentCompletionDelivery({
+          subagent: restored,
+          reason: "requester unavailable",
+        });
+        expect(await loadPendingSessionDeliveries(captureOpenClawStateWorkerContext())).toEqual(
+          events,
+        );
         expect(driver.wake).toHaveBeenCalledOnce();
       } finally {
         driver.controller.clearScheduledResumeTimers();
       }
+    },
+  );
+
+  it.each(["cancelled", "steered", "kill reconciled", "store replaced", "revoked"] as const)(
+    "does not create fresh followup work for a %s child result",
+    async (change) => {
+      const input = failedRecords("failed", { status: "error" });
+      if (change === "cancelled") {
+        input.subagent.endedReason = "subagent-killed";
+      } else if (change === "steered") {
+        input.subagent.suppressAnnounceReason = "steer-restart";
+      } else if (change === "kill reconciled") {
+        input.subagent.killReconciliation = { killedAt: Date.now(), suppressTaskDelivery: true };
+      }
+      persistOwner(input);
+      await mutateRequesterCompletionBatch({
+        entries: [input.subagent],
+        operation: {
+          kind: "settle",
+          outcome: {
+            delivered: false,
+            path: "none",
+            error: "requester unavailable",
+            ...(change === "store replaced" ? { storeReplaced: true } : {}),
+            ...(change === "revoked" ? { disposition: "intentional_non_delivery" } : {}),
+          },
+        },
+        assertCurrent: () => {},
+        databaseOptions: { database },
+      });
+      database = await reopenCompletionFixtureOwners();
+      expect(subagentRuns.get(input.subagent.runId)?.requesterSettleWake).toBeUndefined();
+      expect(readCompletionSystemEvents(database)).toEqual([]);
     },
   );
 
