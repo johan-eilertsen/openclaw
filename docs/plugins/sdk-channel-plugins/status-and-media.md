@@ -121,11 +121,11 @@ the model-facing action schema.
 
 ## Progress card handoff
 
-A waiting reply can carry the optional host-owned
+A reply with pending delegated work can carry the optional host-owned
 `info.adoptProgressDraft(draft)` capability in its reply-dispatch context. An
 editable-progress adapter uses it to keep an already visible card live while the
-children or detached media generation runs the turn waits on run, not to send a
-replacement card or credit final-answer delivery.
+turn waits on children, peer-agent work, or detached media generation. Adopting
+the card does not credit final-answer delivery.
 
 Drain and flush the existing draft, recheck `assertPlatformSendAuthorized`, and
 confirm the platform accepted the card. Staged content or an ambiguous send does
@@ -134,6 +134,17 @@ prepared progress item on the same card, and `retire()` deletes it. Only a `true
 result transfers custody: detach the old stream without deleting its message. If
 the capability is absent or declines, keep ordinary reply delivery, including any
 media or controls alongside the waiting text.
+
+When `info.preserveReplyWithProgress === true`, successful adoption retains only
+the card. The adapter must also deliver the reply payload normally and return
+that delivery's outcome; an accepted card must not hide a failed reply send.
+This lets a meaningful acknowledgment accompany ongoing peer-agent work. When
+the flag is absent, successful adoption may replace the waiting-only reply.
+
+Adapters that support draft adoption must honor this flag or decline adoption
+and deliver the reply normally. Telegram and Discord implement both cases.
+The optional field preserves the type signature, but an older adapter that
+ignores it can discard meaningful replies and needs updating.
 
 The adapter keeps rendering, throttling, and deletion. `retire()` revokes the card
 at once: reject any edit still waiting for platform admission before network I/O.

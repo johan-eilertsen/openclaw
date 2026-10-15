@@ -52,9 +52,9 @@ export type ReplyDispatchRuntimeInfo = {
   assertPlatformSendAuthorized?: () => void;
   /** @internal Bind this delivery's host-owned completion to a transformed payload. */
   bindPendingFinalDelivery?: <T extends ReplyPayload>(payload: T) => T;
-  /** @internal Hand this waiting reply's live progress draft to the children it waits on. */
+  /** @internal Hand this reply's live progress draft to its pending delegated work. */
   adoptProgressDraft?: ProgressContinuationCapability["adopt"];
-  /** A retained draft accompanies this reply instead of replacing it. */
+  /** A retained draft accompanies this reply; deliver the payload and report its own outcome. */
   preserveReplyWithProgress?: true;
   /**
    * @deprecated The 2026.9.8 receipt handoff. The host never offers it, so adapters
