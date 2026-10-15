@@ -81,7 +81,7 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
     directAnnounceResponse: unknown,
   ): SubagentAnnounceDeliveryResult | Promise<SubagentAnnounceDeliveryResult> => {
     if (isGatewayAgentRunPending(directAnnounceResponse)) {
-      return parentOnly || params.sourceTool === "subagent_settle"
+      return parentOnly || params.requireVisibleReply || params.sourceTool === "subagent_settle"
         ? {
             delivered: false,
             path: "direct",

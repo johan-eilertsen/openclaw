@@ -366,6 +366,60 @@ describe("Telegram progress custody and delivery outcomes through HTTP", () => {
     },
   );
 
+  it("creates delegated progress without model events and preserves a meaningful reply", async () => {
+    let draft:
+      | Parameters<NonNullable<ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0]
+      | undefined;
+    const acknowledgment = "I have asked the project agent to check the result.";
+    await dispatchProgressTurn(async () => {}, {
+      mode: "progress",
+      toolProgress: false,
+      finalReply: setReplyPayloadMetadata(
+        { text: acknowledgment },
+        {
+          progressContinuation: {
+            preserveReply: true,
+            adopt: (candidate) => {
+              draft = candidate;
+              return true;
+            },
+            close: () => undefined,
+          },
+        },
+      ),
+    });
+    expect(draft).toBeDefined();
+    expect([...visibleMessages.values()]).toContain(acknowledgment);
+    expect([...visibleMessages.values()].some((text) => text.includes("Delegated work"))).toBe(
+      true,
+    );
+    draft?.push({
+      itemId: "peer",
+      kind: "subagent",
+      title: "Processing the result",
+      phase: "update",
+      status: "running",
+    });
+    await expect
+      .poll(() =>
+        [...visibleMessages.values()].some((text) => text.includes("Processing the result")),
+      )
+      .toBe(true);
+    draft?.push({
+      itemId: "peer",
+      kind: "subagent",
+      title: "Delegated follow-up failed",
+      phase: "end",
+      status: "failed",
+    });
+    await expect
+      .poll(() => [...visibleMessages.values()].join("\n"))
+      .toContain("Delegated follow-up failed");
+    expect([...visibleMessages.values()].join("\n")).not.toContain("Delegated work: running");
+    draft?.retire();
+    await expect.poll(() => [...visibleMessages.values()]).toEqual([acknowledgment]);
+  });
+
   it("gives a queued turn its own progress card while the adopted card stays retained", async () => {
     let draft:
       | Parameters<NonNullable<ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0]

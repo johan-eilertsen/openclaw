@@ -226,6 +226,24 @@ async function adoptProgressDraft(
     return false;
   }
   await info.onPlatformSendDispatch?.();
+  // An accepted delegation owns status even when the model emitted no plan or
+  // commentary. The channel supplies only a generic, audience-safe heading.
+  if (
+    !turn.progressCompositor.isVisible &&
+    !turn.progressCompositor.hasStarted &&
+    !turn.progressCompositor.hasStatusHeadline &&
+    !turn.progressCompositor.hasPlanProgress &&
+    turn.progressCompositor.getSnapshot().lines.length === 0
+  ) {
+    info.assertPlatformSendAuthorized?.();
+    await turn.progressCompositor.pushItemEvent({
+      itemId: "delegation:waiting",
+      kind: "subagent",
+      title: "Delegated work",
+      phase: "update",
+      status: "running",
+    });
+  }
   if (
     !turn.progressCompositor.isVisible &&
     !turn.progressCompositor.hasStarted &&
@@ -336,7 +354,8 @@ async function deliverReplyWithNormalization(
     effectivePayload.interactive === undefined &&
     effectivePayload.presentation === undefined &&
     effectivePayload.channelData?.askUser === undefined &&
-    (await adoptProgressDraft(turn, incomingPayload, info))
+    (await adoptProgressDraft(turn, incomingPayload, info)) &&
+    !info.preserveReplyWithProgress
   ) {
     return toTelegramReplyDeliveryResult(turn, true);
   }

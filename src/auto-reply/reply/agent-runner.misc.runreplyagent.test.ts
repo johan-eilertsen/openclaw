@@ -1,9 +1,10 @@
+import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 // Tests miscellaneous run-reply-agent behaviors and artifact output.
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { parseCliOutput } from "../../agents/cli-output.js";
 import type { RunEmbeddedAgentInternalParams } from "../../agents/embedded-agent-runner/run/internal-params.js";
@@ -13,6 +14,7 @@ import {
   waitForSessionMaintenance,
 } from "../../agents/session-maintenance/coordinator.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
+import { SessionFollowupCompletion } from "../../agents/subagents/completion/session-followup-completion.js";
 import { makeAssistantMessageFixture } from "../../agents/test-helpers/assistant-message-fixtures.js";
 import {
   runFallbackModelAttempt,
@@ -120,6 +122,64 @@ await vi.hoisted(async () => {
 const { runReplyAgent } = await import("./agent-runner-run.js");
 
 setupAgentRunnerTestHooks();
+
+describe("runReplyAgent peer progress", () => {
+  it.each([false, true])(
+    "automatically offers a peer progress card with a model acknowledgment (%s)",
+    async (acknowledgment) => {
+      let owner: SessionFollowupCompletion | undefined;
+      onTestFinished(() => owner?.close());
+      runEmbeddedAgentMock.mockImplementationOnce(
+        async (params: RunEmbeddedAgentInternalParams) => {
+          assert(params.preparedRunAdmission && params.sessionKey && params.agentId);
+          await params.preparedRunAdmission.admit("embedded");
+          owner = SessionFollowupCompletion.bind({
+            runId: "peer-progress-test",
+            requesterTurnRunId: params.runId,
+            visibleReply: true,
+            requesterAgentId: params.agentId,
+            requesterSessionKey: params.sessionKey,
+            requesterSessionId: params.sessionId,
+            targetAgentId: "peer",
+            targetSessionKey: "agent:peer:main",
+            custody: {
+              signal: new AbortController().signal,
+              assertCurrent: () => {},
+              run: (work) => work(),
+              release: () => {},
+            },
+          });
+          owner.markAccepted("peer-progress-test");
+          return {
+            payloads: acknowledgment ? [{ text: "The project agent is checking." }] : [],
+            meta: { durationMs: 0 },
+          };
+        },
+      );
+      const result = await createBaseRun({
+        run: {
+          agentId: "main",
+          sessionKey: "agent:main:main",
+          terminalReplyExpectation: "required",
+        },
+        reply: { sessionKey: "agent:main:main" },
+      }).run();
+      assert(result && !Array.isArray(result));
+      expect(result.text).toBe(
+        acknowledgment
+          ? "The project agent is checking."
+          : "I’m continuing this work and will send the result when it is ready.",
+      );
+      const capability = getReplyPayloadMetadata(result)?.progressContinuation;
+      expect(capability?.preserveReply).toBe(acknowledgment ? true : undefined);
+      const draft = { push: vi.fn(), retire: vi.fn() };
+      expect(capability?.adopt(draft)).toBe(true);
+      expect(draft.push).toHaveBeenCalledWith(expect.objectContaining({ title: "Delegated work" }));
+      owner?.close();
+      expect(draft.retire).toHaveBeenCalledOnce();
+    },
+  );
+});
 
 describe("runReplyAgent pending operator input", () => {
   it("refuses an unbound question without falling through to active-run queueing", async () => {

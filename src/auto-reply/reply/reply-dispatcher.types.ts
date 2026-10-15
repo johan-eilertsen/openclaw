@@ -54,6 +54,8 @@ export type ReplyDispatchRuntimeInfo = {
   bindPendingFinalDelivery?: <T extends ReplyPayload>(payload: T) => T;
   /** @internal Hand this waiting reply's live progress draft to the children it waits on. */
   adoptProgressDraft?: ProgressContinuationCapability["adopt"];
+  /** A retained draft accompanies this reply instead of replacing it. */
+  preserveReplyWithProgress?: true;
   /**
    * @deprecated The 2026.9.8 receipt handoff. The host never offers it, so adapters
    * that check for it keep ordinary waiting-reply delivery. Use `adoptProgressDraft`;

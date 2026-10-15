@@ -686,6 +686,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
                 requesterSessionKey: requesterSession.canonicalKey,
                 requesterAgentId,
                 requesterTurnRunId: opts?.requesterTurnRunId,
+                requesterReplyExpectation: opts?.requesterReplyExpectation,
                 targetSession: targetSessionEntry,
                 withRequesterAuthority,
                 watch: params.watch === true,

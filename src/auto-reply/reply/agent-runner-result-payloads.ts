@@ -11,6 +11,7 @@ import {
   isSyntheticSourceReplyTurn,
   resolveReplyCompletion,
 } from "../../agents/reply-completion.js";
+import { listSessionFollowupCompletions } from "../../agents/subagents/completion/session-followup-completion.js";
 import {
   assertSubagentRegistryWriteSourceCurrent,
   SubagentRegistryWriteError,
@@ -138,6 +139,14 @@ export async function prepareReplyAgentPayloads(state: {
     runResult.didSendDeterministicApprovalPrompt === true;
   const replyOperationRunState = resolveReplyOperationRunState(opts);
   const implicitContinuation = runResult.meta?.continuationPending === true;
+  const peerFollowups =
+    terminalReplyExpectation === "required"
+      ? listSessionFollowupCompletions({
+          requesterSessionKey: sessionKey ?? followupRun.run.sessionKey ?? "",
+          requesterAgentId: followupRun.run.agentId,
+          requesterTurnRunId: runId,
+        })
+      : [];
   // A media-run continuation has no completion child to take over delivery; its status is the reply.
   const continuationOwner =
     implicitContinuation && hasCompletionMessageSessionSpawn(runResult.acceptedSessionSpawns)
@@ -150,6 +159,7 @@ export async function prepareReplyAgentPayloads(state: {
   const pendingContinuation =
     runResult.meta?.yielded === true ||
     implicitContinuation ||
+    peerFollowups.length > 0 ||
     (runResult.meta?.pendingToolCalls?.length ?? 0) > 0;
   if (pendingContinuation && !implicitContinuation) {
     opts?.onPendingContinuation?.();
@@ -220,16 +230,18 @@ export async function prepareReplyAgentPayloads(state: {
   const waitingStatusPayload = terminalFailurePayload
     ? undefined
     : buildWaitingStatusPayload({
-        completion,
+        completion:
+          peerFollowups.length > 0 ? resolveReplyCompletion("required", "pending") : completion,
         yielded: runResult.meta?.yielded === true,
-        continuationPending: implicitContinuation,
+        continuationPending: implicitContinuation || peerFollowups.length > 0,
         yieldAcknowledgment: runResult.meta?.yieldAcknowledgment,
         // Child spawns are side effects, not user-visible messages. They must not
         // suppress the explicit waiting reply for the parent turn.
         hasVisibleMessageDelivery:
-          successfulSourceReplyDelivery ||
-          committedMessagingToolSourceReplyDelivery ||
-          runResult.didSendDeterministicApprovalPrompt === true,
+          peerFollowups.length === 0 &&
+          (successfulSourceReplyDelivery ||
+            committedMessagingToolSourceReplyDelivery ||
+            runResult.didSendDeterministicApprovalPrompt === true),
       });
   const emptyInteractiveReplyPayload = terminalFailurePayload
     ? undefined
@@ -521,7 +533,10 @@ export async function prepareReplyAgentPayloads(state: {
   }
   if (shouldDeliverTerminalFailure && !hasTerminalReply && terminalFailurePayload) {
     replyPayloads = [...replyPayloads, ...(await buildFinalPayloads([terminalFailurePayload]))];
-  } else if (waitingStatusPayload && !hasTerminalReply) {
+  } else if (
+    waitingStatusPayload &&
+    (!hasTerminalReply || (peerFollowups.length > 0 && replyPayloads.length === 0))
+  ) {
     const acknowledgmentPayloads = await buildFinalPayloads([waitingStatusPayload]);
     replyPayloads =
       acknowledgmentPayloads.length > 0
@@ -603,16 +618,16 @@ export async function prepareReplyAgentPayloads(state: {
     implicitContinuation && !continuationOwner
       ? (runtimePolicySessionKey ?? sessionKey ?? followupRun.run.sessionKey)
       : undefined;
-  if (statusPayload) {
-    await attachWaitingStatusProgressContinuation({
-      payload: statusPayload,
-      acceptedSessionSpawns: runResult.acceptedSessionSpawns,
-      mediaRequester: mediaSessionKey
-        ? { sessionKey: mediaSessionKey, agentId: followupRun.run.agentId }
-        : undefined,
-      operation: replyOperation,
-    });
-  }
+  await attachWaitingStatusProgressContinuation({
+    payload: statusPayload,
+    replyPayloads: guardedReplyPayloads,
+    followups: peerFollowups,
+    acceptedSessionSpawns: runResult.acceptedSessionSpawns,
+    mediaRequester: mediaSessionKey
+      ? { sessionKey: mediaSessionKey, agentId: followupRun.run.agentId }
+      : undefined,
+    operation: replyOperation,
+  });
 
   if (continuationOwner) {
     const acceptedSessionSpawns = runResult.acceptedSessionSpawns;

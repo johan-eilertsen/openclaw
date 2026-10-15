@@ -458,7 +458,11 @@ export function createReplyDispatcher(
           ? getReplyPayloadMetadata(deliveredPayload)?.progressContinuation
           : undefined;
       const deliveryInfo = continuation
-        ? { ...info, adoptProgressDraft: continuation.adopt }
+        ? {
+            ...info,
+            adoptProgressDraft: continuation.adopt,
+            ...(continuation.preserveReply ? { preserveReplyWithProgress: true as const } : {}),
+          }
         : info;
       const result =
         deliveryInput.kind === "prepared" && options.deliverPrepared
