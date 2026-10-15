@@ -92,7 +92,7 @@ describe("processDiscordMessage provider preview hook safety", () => {
 });
 
 describe("processDiscordMessage draft streaming final delivery", () => {
-  it.each([true, false])(
+  it.each([true, undefined] as const)(
     "keeps the adopted progress card and honors reply preservation (%s)",
     async (preserveReply) => {
       const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
