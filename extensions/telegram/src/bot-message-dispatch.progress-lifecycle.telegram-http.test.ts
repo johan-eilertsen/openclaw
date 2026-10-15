@@ -366,6 +366,68 @@ describe("Telegram progress custody and delivery outcomes through HTTP", () => {
     },
   );
 
+  it("waits for an in-flight initial card receipt before handing it to delegated work", async () => {
+    const held = {
+      predicate: (call: { method: string }) => call.method === "sendMessage",
+      arrived: Promise.withResolvers<void>(),
+      release: Promise.withResolvers<void>(),
+    };
+    http.holdNextCall = held;
+    let draft:
+      | Parameters<NonNullable<ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0]
+      | undefined;
+    const dispatch = dispatchProgressTurn(async () => {}, {
+      mode: "progress",
+      toolProgress: true,
+      producer: async ({ dispatcher, replyOptions }) => {
+        await replyOptions?.onReplyStart?.();
+        await replyOptions?.onAssistantMessageStart?.();
+        await emitToolStart(replyOptions, {
+          name: "exec",
+          phase: "start",
+          toolCallId: "delegate",
+        });
+        // The timer has started the send outside the draft event queue.
+        await held.arrived.promise;
+        dispatcher.sendFinalReply(
+          setReplyPayloadMetadata(
+            { text: "Waiting for delegated work." },
+            {
+              progressContinuation: {
+                adopt: (candidate) => {
+                  draft = candidate;
+                  return true;
+                },
+                close: () => undefined,
+              },
+            },
+          ),
+        );
+        return { queuedFinal: true, counts: dispatcher.getQueuedCounts() };
+      },
+    });
+    try {
+      await held.arrived.promise;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(draft).toBeUndefined();
+    } finally {
+      held.release.resolve();
+    }
+    await dispatch;
+    expect(draft).toBeDefined();
+    draft?.push({
+      itemId: "peer",
+      kind: "subagent",
+      title: "Delegated work",
+      phase: "update",
+      status: "running",
+    });
+    await expect.poll(() => [...visibleMessages.values()].join("\n")).toContain("Delegated work");
+    draft?.retire();
+    await expect.poll(() => visibleMessages.size).toBe(0);
+    expect(calls.filter((call) => call.method === "sendMessage")).toHaveLength(1);
+  });
+
   it("creates delegated progress without model events and preserves a meaningful reply", async () => {
     let draft:
       | Parameters<NonNullable<ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0]

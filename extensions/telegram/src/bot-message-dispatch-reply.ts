@@ -254,7 +254,9 @@ async function adoptProgressDraft(
     info.assertPlatformSendAuthorized?.();
     await turn.progressCompositor.start();
   }
-  if (!turn.progressCompositor.isVisible || turn.isSuperseded()) {
+  // The gate can start a send outside the draft event queue. Its first receipt
+  // may still be in flight; flush it before checking confirmed ownership below.
+  if (turn.isSuperseded()) {
     return false;
   }
   turn.progressCompositor.cancel();
