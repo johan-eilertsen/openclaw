@@ -35,6 +35,7 @@ const fixture = vi.hoisted(() => ({
   gatewayContext: {},
   visibleDelivery: vi.fn(),
 }));
+// mock-isolation: Control delivery receipts without loading the real requester delivery runtime.
 vi.mock("../subagents/announce/subagent-announce-direct-delivery.js", () => ({
   sendSubagentAnnounceDirectly: fixture.visibleDelivery,
 }));
