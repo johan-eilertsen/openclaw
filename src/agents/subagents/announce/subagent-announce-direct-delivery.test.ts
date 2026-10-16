@@ -155,7 +155,7 @@ describe("late exact requester recovery", () => {
     };
   }
 
-  it.each(["delivered", "processing only", "pending", "replaced"] as const)(
+  it.each(["delivered", "processing only", "silent", "pending", "replaced"] as const)(
     "requires the original peer requester and a visible receipt (%s)",
     async (outcome) => {
       const fixture = setup();
@@ -178,7 +178,9 @@ describe("late exact requester recovery", () => {
                       deliveryStatus: sentDeliveryStatus,
                     },
                   }
-                : {}),
+                : outcome === "silent"
+                  ? { result: { payloads: [], meta: { terminalReply: { disposition: "silent" } } } }
+                  : {}),
             },
       );
       const result = await fixture.startDelivery();

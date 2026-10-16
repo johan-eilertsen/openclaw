@@ -2,13 +2,15 @@ import { describe, expect, it } from "vitest";
 import { buildEmbeddedAttemptToolRunContext } from "./attempt-tool-run-context.js";
 
 describe("buildEmbeddedAttemptToolRunContext", () => {
-  it("carries the host reply obligation without making internal optional turns public", () => {
+  it("carries the host reply obligation without making explicitly optional turns public", () => {
     expect(buildEmbeddedAttemptToolRunContext({ trigger: "user" }).requesterReplyExpectation).toBe(
-      "required",
+      "result-required",
     );
     expect(
-      buildEmbeddedAttemptToolRunContext({ inputProvenance: { kind: "inter_session" } })
-        .requesterReplyExpectation,
+      buildEmbeddedAttemptToolRunContext({
+        inputProvenance: { kind: "inter_session" },
+        terminalReplyExpectation: "optional",
+      }).requesterReplyExpectation,
     ).toBe("optional");
     expect(
       buildEmbeddedAttemptToolRunContext({
