@@ -128,7 +128,9 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
       !directAnnounceResult?.meta?.error &&
       !directAnnounceResult?.meta?.aborted;
     const acceptsIntentionalSilentCompletion =
-      !params.requireVisibleReply &&
+      // Peer handoffs explicitly owe a visible reply; child settlement keeps
+      // the external conversation's existing intentional-silence policy.
+      !(params.requireVisibleReply && params.sourceTool === "sessions_send") &&
       replyExpectation !== "result-required" &&
       requesterCompletedSuccessfully &&
       hasIntentionalSilentCompletionReply &&
