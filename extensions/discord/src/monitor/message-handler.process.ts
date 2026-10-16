@@ -363,7 +363,7 @@ export async function processDiscordMessage(
     }
     if (
       (await draftPreview.adoptProgressDraft(deliverablePayload, info)) &&
-      !info.preserveReplyWithProgress
+      !info.adoptProgressDraftWithReply
     ) {
       replyReference.markSent();
       return { visibleReplySent: true };

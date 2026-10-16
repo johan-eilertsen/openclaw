@@ -135,16 +135,18 @@ result transfers custody: detach the old stream without deleting its message. If
 the capability is absent or declines, keep ordinary reply delivery, including any
 media or controls alongside the waiting text.
 
-When `info.preserveReplyWithProgress === true`, successful adoption retains only
-the card. The adapter must also deliver the reply payload normally and return
-that delivery's outcome; an accepted card must not hide a failed reply send.
-This lets a meaningful acknowledgment accompany ongoing peer-agent work. When
-the flag is absent, successful adoption may replace the waiting-only reply.
+For a meaningful reply, the host instead offers
+`info.adoptProgressDraftWithReply(draft)`. Adapters opt in by using this separate
+capability: successful adoption retains only the card, and the adapter must also
+deliver the reply payload normally and return that delivery's outcome. An
+accepted card must not hide a failed reply send. Telegram and Discord implement
+both capabilities.
 
-Adapters that support draft adoption must honor this flag or decline adoption
-and deliver the reply normally. Telegram and Discord implement both cases.
-The optional field preserves the type signature, but an older adapter that
-ignores it can discard meaningful replies and needs updating.
+The two capabilities are mutually exclusive. `adoptProgressDraft` keeps its
+waiting-only replacement behavior. Existing adapters that only use that
+capability receive no adoption offer for a meaningful reply and keep ordinary
+delivery without an update. They can add `adoptProgressDraftWithReply` support to
+retain a card alongside that reply.
 
 The adapter keeps rendering, throttling, and deletion. `retire()` revokes the card
 at once: reject any edit still waiting for platform admission before network I/O.

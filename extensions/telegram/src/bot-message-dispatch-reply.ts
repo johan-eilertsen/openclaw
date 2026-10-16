@@ -212,14 +212,10 @@ async function adoptProgressDraft(
   payload: ReplyPayload,
   info: Parameters<NonNullable<Deliver>>[1],
 ): Promise<boolean> {
-  if (
-    info.kind !== "final" ||
-    payload.isError === true ||
-    typeof info.adoptProgressDraft !== "function"
-  ) {
+  const adopt = info.adoptProgressDraftWithReply ?? info.adoptProgressDraft;
+  if (info.kind !== "final" || payload.isError === true || !adopt) {
     return false;
   }
-  const adopt = info.adoptProgressDraft;
   await turn.draftEventQueue;
   const stream = turn.answerLane.stream;
   if (!stream || turn.answerLane.finalized || turn.isSuperseded()) {
@@ -357,7 +353,7 @@ async function deliverReplyWithNormalization(
     effectivePayload.presentation === undefined &&
     effectivePayload.channelData?.askUser === undefined &&
     (await adoptProgressDraft(turn, incomingPayload, info)) &&
-    !info.preserveReplyWithProgress
+    !info.adoptProgressDraftWithReply
   ) {
     return toTelegramReplyDeliveryResult(turn, true);
   }

@@ -12,6 +12,7 @@ import {
 } from "./dispatch-from-config.shared.test-harness.js";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAgentHarnesses } from "../../agents/harness/registry.js";
+import { resolveReplyCompletion } from "../../agents/reply-completion.js";
 import {
   OutboundDeliveryError,
   PlatformMessageNotDispatchedError,
@@ -26,6 +27,7 @@ import {
   dispatchMemorySessionScope,
 } from "./dispatch-memory-session.test-support.js";
 import { createReplyDispatcher } from "./reply-dispatcher.js";
+import { resolveReplyOperationRunState } from "./reply-operation-run-state.js";
 import { assertSessionWriterDeliveryAuthorized } from "./session-writer-delivery-authority.js";
 
 let dispatchReplyFromConfig: typeof import("./dispatch-from-config.js").dispatchReplyFromConfig;
@@ -90,6 +92,40 @@ afterEach(() => {
 });
 
 describe("accepted continuation status delivery", () => {
+  it.each([true, undefined] as const)(
+    "preserves ordinary delivery for a legacy draft adopter with preserveReply=%s",
+    async (preserveReply) => {
+      const messages: string[] = [];
+      const adopt = vi.fn(() => true);
+      const payload = setReplyPayloadMetadata(
+        {
+          text: preserveReply
+            ? "I found the first result; the rest will follow."
+            : "Still working.",
+        },
+        { progressContinuation: { preserveReply, adopt, close: () => undefined } },
+      );
+      const dispatcher = createReplyDispatcher({
+        deliver: async (reply, info) => {
+          // An existing adapter replaces the reply after successful adoption.
+          if (info.adoptProgressDraft?.(progressDraft)) {
+            return { visibleReplySent: true };
+          }
+          messages.push(reply.text ?? "");
+          return { visibleReplySent: true };
+        },
+      });
+      await withReplyDispatcher({
+        dispatcher,
+        run: async () => {
+          dispatcher.sendFinalReply(payload);
+        },
+      });
+      expect(messages).toEqual(preserveReply ? [payload.text] : []);
+      expect(adopt).toHaveBeenCalledTimes(preserveReply ? 0 : 1);
+    },
+  );
+
   it.each([
     { outcome: "ambiguous", initial: "prepared", expected: "unknown" },
     { outcome: "recovery-owned", initial: "prepared", expected: undefined },
@@ -425,26 +461,34 @@ describe("accepted continuation status delivery", () => {
     },
   );
 
-  it("releases an accepted continuation when its status was removed from the batch", async () => {
-    const settle = vi.fn(async () => {});
-    const dispatcher = createReplyDispatcher({ deliver: vi.fn() });
+  it.each(["empty", "silent", "pending"] as const)(
+    "settles an accepted continuation after a %s final without a status",
+    async (outcome) => {
+      const settle = vi.fn(async () => {});
+      const dispatcher = createReplyDispatcher({ deliver: vi.fn() });
 
-    await withReplyDispatcher({
-      dispatcher,
-      run: () =>
-        dispatchReplyFromConfig({
-          ctx: createHookCtx(),
-          cfg: emptyConfig,
-          dispatcher,
-          replyResolver: async (_ctx, opts) => {
-            opts?.onPendingContinuation?.({ settle });
-            return undefined;
-          },
-        }),
-    });
+      await withReplyDispatcher({
+        dispatcher,
+        run: () =>
+          dispatchReplyFromConfig({
+            ctx: createHookCtx(),
+            cfg: emptyConfig,
+            dispatcher,
+            replyResolver: async (_ctx, opts) => {
+              const runState = resolveReplyOperationRunState(opts);
+              if (!runState) {
+                throw new Error("expected reply operation run state");
+              }
+              runState.replyCompletion = resolveReplyCompletion("required", outcome);
+              opts?.onPendingContinuation?.({ settle });
+              return undefined;
+            },
+          }),
+      });
 
-    expect(settle).toHaveBeenCalledExactlyOnceWith(false);
-  });
+      expect(settle).toHaveBeenCalledExactlyOnceWith(outcome !== "empty");
+    },
+  );
 
   it.each(["resolver", "session metadata"])(
     "releases an accepted continuation when %s fails before finalization",

@@ -7,7 +7,6 @@ import { readEngineAnchor } from "../infra/database-engine/open.js";
 import {
   withDatabasePortPostgres,
   withDatabasePortConnection,
-  requireDatabasePortProvider,
 } from "../infra/database-engine/port-provider.js";
 import { admitDatabasePortDescriptor } from "../infra/database-engine/port.worker.js";
 import { requireDirectorySync, syncDirectory } from "../infra/directory-durability.js";
@@ -17,6 +16,7 @@ import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
 import { prepareSqliteReadOnlyLocationSync } from "../infra/sqlite-snapshot-source.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 import {
+  captureDatabaseArtifact,
   exportPostgresBackup,
   restorePostgresBackup,
   fingerprintPostgresDatabase,
@@ -175,8 +175,17 @@ async function preparePostgresRestoreInWorker(params: {
     throw new Error("PostgreSQL rollback capture belongs to a different store.");
   }
   return await withDatabasePortConnection(params.config, async (client) => {
-    const descriptor = await requireDatabasePortProvider(manifest.source.owner).loadDescriptor();
-    return restorePostgresBackup({ ...params, client, descriptor, manifest });
+    const { loadDatabasePortDescriptor } =
+      await import("../infra/database-engine/port-provider-descriptor.js");
+    const descriptor = await loadDatabasePortDescriptor(manifest.source.owner, params.config);
+    const { namespace } = await restorePostgresBackup({ ...params, client, descriptor, manifest });
+    const { resolveDatabaseEngineInput } = await import("../infra/database-engine/config.js");
+    const input = await resolveDatabaseEngineInput(params.config);
+    params.assertCurrent();
+    await descriptor.admit?.(params.anchorPath, input);
+    // Owner admission can change anchor journal mode; bind the final bytes for publication.
+    const { sha256, size: sizeBytes } = await captureDatabaseArtifact(params.anchorPath);
+    return { namespace, sha256, sizeBytes };
   });
 }
 

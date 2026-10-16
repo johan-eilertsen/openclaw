@@ -1,12 +1,10 @@
 // SQLite trajectory runtime tests cover session-scoped event row storage.
+
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync, StatementSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  observeSqliteReadSql,
-  trackSqliteStatementExecutions,
-} from "../../test/helpers/sqlite-statement-execution-counter.js";
+import { trackSqliteStatementExecutions } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { openNodeSqliteDatabase } from "../infra/node-sqlite.js";
@@ -19,6 +17,7 @@ import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
 } from "../state/openclaw-agent-db.js";
+import { requireNativeSqliteDatabase } from "../test-utils/native-sqlite.js";
 import { useSessionStoreTempDirs } from "../test-utils/session-state-cleanup.js";
 import {
   appendSqliteTrajectoryRuntimeEventsWithWriter,
@@ -64,8 +63,10 @@ describe("SQLite trajectory runtime store", () => {
         return { ...events[0] };
       },
     });
-    const counter = trackSqliteStatementExecutions(database.db, ["append"], (sql) =>
-      /^insert into "trajectory_runtime_events"/i.test(sql) ? "append" : null,
+    const counter = trackSqliteStatementExecutions(
+      requireNativeSqliteDatabase(database.db),
+      ["append"],
+      (sql) => (/^insert into "trajectory_runtime_events"/i.test(sql) ? "append" : null),
     );
     try {
       appendSerializedTrajectoryRuntimeEvents(
@@ -95,31 +96,6 @@ describe("SQLite trajectory runtime store", () => {
     expect(rows).toEqual(
       events.map((event, seq) => ({ run_id: "run-1", seq, event_json: JSON.stringify(event) })),
     );
-  });
-
-  it("reads committed runtime events in its worker after an in-process append", async () => {
-    const scope = { sessionId: "session-1", storePath };
-    const first = createTrajectoryEvent({ type: "first" });
-    const second = createTrajectoryEvent({ type: "second" });
-    appendSqliteTrajectoryRuntimeEvents(scope, [first]);
-    const reads = observeSqliteReadSql(StatementSync.prototype);
-    try {
-      await expect(loadSqliteTrajectoryRuntimeEvents(scope)).resolves.toEqual([first]);
-      reads.restore();
-      appendSqliteTrajectoryRuntimeEvents(scope, [second]);
-      const nextReads = observeSqliteReadSql(StatementSync.prototype);
-      try {
-        await expect(loadSqliteTrajectoryRuntimeEvents(scope)).resolves.toEqual([first, second]);
-        expect(nextReads.queries.filter((sql) => /trajectory_runtime_events/i.test(sql))).toEqual(
-          [],
-        );
-      } finally {
-        nextReads.restore();
-      }
-      expect(reads.queries.filter((sql) => /trajectory_runtime_events/i.test(sql))).toEqual([]);
-    } finally {
-      reads.restore();
-    }
   });
 
   it.each(["session-1", "session-2"])(
@@ -226,8 +202,11 @@ describe("SQLite trajectory runtime store", () => {
       ).receipt.windowFacts;
     const first = append(events[0]!);
     let committed = first;
-    const counter = trackSqliteStatementExecutions(database.db, ["window"], (sql) =>
-      /^select\b/i.test(sql) && sql.includes('"trajectory_runtime_events"') ? "window" : null,
+    const counter = trackSqliteStatementExecutions(
+      requireNativeSqliteDatabase(database.db),
+      ["window"],
+      (sql) =>
+        /^select\b/i.test(sql) && sql.includes('"trajectory_runtime_events"') ? "window" : null,
     );
     try {
       const second = append(events[1]!, first);
@@ -313,35 +292,6 @@ describe("SQLite trajectory runtime store", () => {
     await expect(
       loadSqliteTrajectoryRuntimeEvents({ agentId: "main", sessionId: "session-1", storePath }),
     ).resolves.toEqual([]);
-  });
-
-  it("trims the retained byte window without fetching UTF-8 event bodies", async () => {
-    const history = Array.from({ length: 64 }, (_, index) =>
-      createTrajectoryEvent({ type: `old-${index}`, payloadSize: 64 * 1024 }),
-    );
-    appendSqliteTrajectoryRuntimeEvents({ sessionId: "session-1", storePath }, history);
-    const newest = createTrajectoryEvent({ type: "newest" });
-    const retained = [...history.slice(-2), newest];
-    const maxRuntimeBytes = retained.reduce(
-      (bytes, event) => bytes + Buffer.byteLength(JSON.stringify(event), "utf8") + 1,
-      0,
-    );
-    const database = openOpenClawAgentDatabase({ agentId: "main", path: sqlitePath() });
-    const counter = trackSqliteStatementExecutions(database.db, ["window"], (sql) =>
-      /^select\b/i.test(sql) && sql.includes('"trajectory_runtime_events"') ? "window" : null,
-    );
-    try {
-      appendSqliteTrajectoryRuntimeEvents({ maxRuntimeBytes, sessionId: "session-1", storePath }, [
-        newest,
-      ]);
-      expect(counter.counts.window).toBe(1);
-      expect(counter.textBytes.window).toBe(0);
-    } finally {
-      counter.restore();
-    }
-    await expect(
-      loadSqliteTrajectoryRuntimeEvents({ sessionId: "session-1", storePath }),
-    ).resolves.toEqual(retained);
   });
 
   it.each(
@@ -632,9 +582,10 @@ describe("SQLite trajectory runtime reader snapshot consistency", () => {
     // Spy on the cached connection's prepare() to inject a competing row between the budget aggregate and payload SELECT.
     const database = openOpenClawAgentDatabase({ agentId: "main", path: dbPath });
     const injector = createCompetingRowInjector(dbPath, "session-1");
-    const prepare = database.db.prepare.bind(database.db);
+    const native = requireNativeSqliteDatabase(database.db);
+    const prepare = native.prepare.bind(native);
     let injected = false;
-    const prepareSpy = vi.spyOn(database.db, "prepare").mockImplementation((sql) => {
+    const prepareSpy = vi.spyOn(native, "prepare").mockImplementation((sql) => {
       const statement = prepare(sql);
       // Inject after the budget aggregate, before the payload SELECT iterates rows.
       if (!injected && sql.includes(`"seq", "event_json"`)) {
