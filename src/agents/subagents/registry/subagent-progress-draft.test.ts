@@ -1,8 +1,10 @@
 // Preserve module setup before modules that consume it.
 // oxfmt-ignore
 import { runSubagentStateWorkerOperation, useSubagentControlFixture } from "./subagent-control.test-support.js";
-import { afterEach, beforeEach, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, expect, it, onTestFinished, vi, type Mock } from "vitest";
 import { prepareSessionRunTargetAbort } from "../../../auto-reply/reply/abort-operation.js";
+import type { ProgressContinuationDraft } from "../../../channels/progress-continuation.js";
+import { createChannelProgressDraftCompositor } from "../../../channels/progress-draft-compositor.js";
 import { captureRuntimeConfigAsyncReader, getRuntimeConfig } from "../../../config/config.js";
 import { resolveSessionStorePathCore } from "../../../config/sessions.js";
 import { upsertSessionEntryCore } from "../../../config/sessions/session-accessor.js";
@@ -127,8 +129,31 @@ function answerWakes(
   return wakes;
 }
 
-type TestDraft = { push: Mock; retire: Mock };
-const newDraft = (): TestDraft => ({ push: vi.fn(), retire: vi.fn() });
+type TestDraft = { push: Mock; updatePlan: Mock; retire: Mock };
+const newDraft = (): TestDraft => ({ push: vi.fn(), updatePlan: vi.fn(), retire: vi.fn() });
+
+function renderedDraft() {
+  const progress = createChannelProgressDraftCompositor({
+    active: true,
+    mode: "progress",
+    seed: "retained-delegation",
+    preparedItems: true,
+    showWorkStatus: true,
+    entry: { streaming: { mode: "progress", progress: { toolProgress: true } } },
+  });
+  onTestFinished(() => progress.cancel());
+  let pending: Promise<unknown> = progress.start();
+  const draft = {
+    push: vi.fn<ProgressContinuationDraft["push"]>((item) => {
+      pending = pending.then(() => progress.pushItemEvent(item));
+    }),
+    updatePlan: vi.fn<NonNullable<ProgressContinuationDraft["updatePlan"]>>((steps, options) => {
+      pending = pending.then(() => progress.pushPlanProgress(steps, options));
+    }),
+    retire: vi.fn(),
+  };
+  return { draft, progress, flush: () => pending };
+}
 
 function bindPeer(
   runId: string,
@@ -156,9 +181,10 @@ function bindPeer(
   return owner;
 }
 
-it("keeps a peer card through the requester and its next delegation without exposing private text", async () => {
+it("updates the same peer card through two handoffs without retaining closed rows or private plans", async () => {
   const peer = bindPeer("peer-run");
-  const draft = newDraft();
+  const { draft, progress, flush } = renderedDraft();
+  await progress.pushPlanProgress([{ step: "Original request", status: "in_progress" }]);
   expect(adoptSubagentProgressDraft([], draft, [peer])).toBe(true);
   emitAgentEvent({
     runId: "peer-run",
@@ -173,24 +199,70 @@ it("keeps a peer card through the requester and its next delegation without expo
       result: CHILD_RESULT,
     },
   });
+  emitAgentEvent({
+    runId: "peer-run",
+    stream: "plan",
+    data: { steps: [{ step: CHILD_RESULT, status: "in_progress" }], explanation: CHILD_RESULT },
+  });
   let next: SessionFollowupCompletion | undefined;
+  let last: SessionFollowupCompletion | undefined;
   try {
     await peer.withRequesterRun("requester-return", async () => {
       expect(draft.push).toHaveBeenCalledWith(
         expect.objectContaining({ title: "Processing the result" }),
       );
+      emitAgentEvent({
+        runId: "requester-return",
+        stream: "plan",
+        data: {
+          steps: [{ step: "Verify the result", status: "in_progress" }],
+          explanation: "Updated *literal* plan",
+          explanationFormat: "plain",
+        },
+      });
       next = bindPeer("next-peer-run", "requester-return");
       expect(draft.retire).not.toHaveBeenCalled();
     });
     peer.close();
     expect(draft.retire).not.toHaveBeenCalled();
     expect(draft.push).toHaveBeenCalledWith(expect.objectContaining({ itemId: "next-peer-run" }));
+    await flush();
+    expect(progress.getSnapshot().plan).toEqual([
+      { step: "Verify the result", status: "in_progress" },
+    ]);
+    expect(progress.getSnapshot().planExplanation).toBe("Updated *literal* plan");
+    expect(progress.getSnapshot().planExplanationFormat).toBe("plain");
+    expect(JSON.stringify(progress.getSnapshot())).not.toContain(CHILD_RESULT);
+    expect(progress.getSnapshot().lines).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "peer-run" })]),
+    );
+    expect(progress.getSnapshot().lines).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "peer-run:tool" })]),
+    );
     expectNoChildResultPushed(draft);
+    await next!.withRequesterRun("requester-again", async () => {
+      emitAgentEvent({ runId: "requester-again", stream: "plan", data: { steps: [] } });
+      last = bindPeer("last-peer-run", "requester-again");
+    });
     next?.close();
+    // Closed requesters cannot overwrite the current owner's plan.
+    emitAgentEvent({
+      runId: "requester-return",
+      stream: "plan",
+      data: { steps: [{ step: "Stale plan", status: "in_progress" }] },
+    });
+    await flush();
+    expect(progress.getSnapshot().plan).toBeUndefined();
+    expect(progress.getSnapshot().lines).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "next-peer-run" })]),
+    );
+    expect(draft.retire).not.toHaveBeenCalled();
+    last?.close();
     expect(draft.retire).toHaveBeenCalledOnce();
   } finally {
     peer.close();
     next?.close();
+    last?.close();
   }
 });
 
@@ -424,6 +496,11 @@ it("keeps the card for the resumed requester's re-yield cohort until that cohort
     draft,
     ["Waiting for the follow-up checks.", "Everything is verified."],
     async (params) => {
+      emitAgentEvent({
+        runId: String(params?.idempotencyKey),
+        stream: "plan",
+        data: { steps: [{ step: "Follow-up checks", status: "in_progress" }] },
+      });
       await yieldCohort(String(params?.idempotencyKey), ["c", "d"]);
     },
   );
@@ -431,6 +508,10 @@ it("keeps the card for the resumed requester's re-yield cohort until that cohort
   await endRun("a");
   await endRun("b");
   expect(wakes).toHaveLength(1);
+  expect(draft.updatePlan).toHaveBeenCalledWith(
+    [{ step: "Follow-up checks", status: "in_progress" }],
+    expect.any(Object),
+  );
   expect(draft.retire).not.toHaveBeenCalled();
   for (const itemId of ["c", "d"]) {
     expect(draft.push).toHaveBeenCalledWith(

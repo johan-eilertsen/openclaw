@@ -135,6 +135,13 @@ result transfers custody: detach the old stream without deleting its message. If
 the capability is absent or declines, keep ordinary reply delivery, including any
 media or controls alongside the waiting text.
 
+Adapters may also provide `updatePlan(steps, options)` to replace the retained
+card's checklist and explanation through the same rendering queue. An empty plan
+retracts the checklist. The host forwards only the resumed requester's plan;
+private child and peer plans never cross this boundary. Telegram supports this
+optional method. Closed follow-up owners retract their status and operation rows
+instead of leaving them running; explicit failures remain visible.
+
 For a meaningful reply, the host instead offers
 `info.adoptProgressDraftWithReply(draft)`. Adapters opt in by using this separate
 capability: successful adoption retains only the card, and the adapter must also

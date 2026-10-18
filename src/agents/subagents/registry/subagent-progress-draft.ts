@@ -1,4 +1,6 @@
+import { readStringValue } from "@openclaw/normalization-core/string-coerce";
 import type { ProgressContinuationDraft } from "../../../channels/progress-continuation.js";
+import { normalizeAgentPlanSteps } from "../../../channels/streaming.js";
 import { onAgentEventForRun, type AgentEventPayload } from "../../../infra/agent-events.js";
 import type { AcceptedSessionSpawn } from "../../accepted-session-spawn.js";
 import { listSessionFollowupCompletions } from "../completion/session-followup-completion.js";
@@ -105,8 +107,21 @@ function projectChild(entry: SubagentRunRecord): ProgressItem {
   };
 }
 
-function follow(live: LiveDraft, runId: string, itemId: string): () => void {
+function follow(
+  live: LiveDraft,
+  runId: string,
+  itemId: string,
+  audience: "child" | "requester",
+): () => void {
   return onAgentEventForRun(runId, (event) => {
+    // A private child's plan must never replace the requester's public checklist.
+    if (audience === "requester" && event.stream === "plan") {
+      live.draft.updatePlan?.(normalizeAgentPlanSteps(event.data.steps), {
+        explanation: readStringValue(event.data.explanation),
+        ...(event.data.explanationFormat === "plain" ? { explanationFormat: "plain" } : {}),
+      });
+      return;
+    }
     const item = projectActivity(event, itemId);
     if (item) {
       live.draft.push(item);
@@ -124,7 +139,7 @@ function track(live: LiveDraft, entries: readonly SubagentRunRecord[]): void {
       childSessionKey: entry.childSessionKey,
       childAgentId: entry.childAgentId,
       row: entry,
-      stopEvents: follow(live, entry.runId, `${id}:tool`),
+      stopEvents: follow(live, entry.runId, `${id}:tool`, "child"),
     });
     liveByTask.set(id, live);
     live.draft.push(projectChild(entry));
@@ -176,7 +191,12 @@ function trackFollowups(live: LiveDraft, owners: readonly FollowupCompletionOwne
       if (requesterRunId) {
         liveByWake.set(requesterRunId, live);
       }
-      stopEvents = follow(live, runId, `${owner.request.runId}:tool`);
+      stopEvents = follow(
+        live,
+        runId,
+        `${owner.request.runId}:tool`,
+        phase === "processing" ? "requester" : "child",
+      );
       live.draft.push({
         itemId: owner.request.runId,
         kind: "subagent",
@@ -206,6 +226,12 @@ function trackFollowups(live: LiveDraft, owners: readonly FollowupCompletionOwne
       stop();
       live.followups.delete(owner);
       liveByFollowup.delete(owner);
+      // Closing relinquishes this row; it does not prove successful completion.
+      // Keep an explicit failure visible, but remove stale work from prior owners.
+      if (owner.progress.phase !== "failed") {
+        live.draft.push({ itemId: owner.request.runId, hideFromChannelProgress: true });
+        live.draft.push({ itemId: `${owner.request.runId}:tool`, hideFromChannelProgress: true });
+      }
       retireIfEmpty(live);
     };
     const stop = () => {
@@ -239,7 +265,7 @@ function reconcile(live: LiveDraft): void {
     }
     if (row.runId !== member.row.runId) {
       member.stopEvents();
-      member.stopEvents = follow(live, row.runId, `${id}:tool`);
+      member.stopEvents = follow(live, row.runId, `${id}:tool`, "child");
     }
     member.row = row;
     live.draft.push(projectChild(row));
@@ -298,7 +324,7 @@ export async function withSubagentProgressDraft<T>(
     return await run();
   }
   liveByWake.set(wakeRunId, live);
-  const stopEvents = follow(live, wakeRunId, "requester:tool");
+  const stopEvents = follow(live, wakeRunId, "requester:tool", "requester");
   try {
     return await run();
   } finally {

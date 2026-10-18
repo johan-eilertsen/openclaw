@@ -355,6 +355,23 @@ describe("Telegram progress custody and delivery outcomes through HTTP", () => {
       await expect
         .poll(() => [...visibleMessages.values()][0], { timeout: 5_000 })
         .toContain("Delegated verification");
+      draft?.updatePlan?.(
+        [
+          { step: "Review returned findings", status: "completed" },
+          { step: "Check revised scope", status: "completed" },
+          { step: "Verify the fix", status: "in_progress" },
+        ],
+        { explanation: "2/3 complete", explanationFormat: "plain" },
+      );
+      await expect
+        .poll(() => visibleMessages.get(progressMessageId!), { timeout: 5_000 })
+        .toContain("Verify the fix");
+      expect(visibleMessages.get(progressMessageId!)).toContain("2/3 complete");
+      expect(visibleMessages.get(progressMessageId!)).not.toContain("Finish delegated work");
+      draft?.updatePlan?.([]);
+      await expect
+        .poll(() => visibleMessages.get(progressMessageId!), { timeout: 5_000 })
+        .not.toContain("Verify the fix");
       draft?.retire();
       await expect.poll(() => [...visibleMessages.keys()], { timeout: 5_000 }).toEqual([]);
       expect(
