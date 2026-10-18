@@ -389,7 +389,7 @@ describe("Telegram progress custody and delivery outcomes through HTTP", () => {
     let draft:
       | Parameters<NonNullable<ReplyDispatchRuntimeInfo["adoptProgressDraft"]>>[0]
       | undefined;
-    const dispatch = dispatchProgressTurn(async () => {}, {
+    const dispatchTurn = dispatchProgressTurn(async () => {}, {
       mode: "progress",
       toolProgress: true,
       producer: async ({ dispatcher, replyOptions }) => {
@@ -426,7 +426,7 @@ describe("Telegram progress custody and delivery outcomes through HTTP", () => {
     } finally {
       held.release.resolve();
     }
-    await dispatch;
+    await dispatchTurn;
     expect(draft).toBeDefined();
     draft?.push({
       itemId: "peer",
