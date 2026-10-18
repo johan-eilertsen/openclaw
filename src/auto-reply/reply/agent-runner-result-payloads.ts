@@ -122,7 +122,7 @@ export async function prepareReplyAgentPayloads(state: {
     terminalFailurePayload,
     usage,
   } = accounting;
-  let { activeSessionEntry, didLogHeartbeatStrip } = accounting;
+  let { activeSessionEntry } = accounting;
   const terminalReplyExpectation =
     followupRun.run.terminalReplyExpectation ??
     resolveSourceReplyExpectation({
@@ -333,7 +333,6 @@ export async function prepareReplyAgentPayloads(state: {
       payloads,
       conversationContext: sessionCtx.agentText ?? sessionCtx.BodyForAgent,
       isHeartbeat,
-      didLogHeartbeatStrip,
       silentExpected: followupRun.run.silentExpected,
       blockStreamingEnabled,
       blockReplyPipeline,
@@ -355,7 +354,6 @@ export async function prepareReplyAgentPayloads(state: {
       accountId: sessionCtx.AccountId,
       normalizeMediaPaths: replyMediaContext.normalizePayload,
     });
-    didLogHeartbeatStrip = result.didLogHeartbeatStrip;
     return result.replyPayloads;
   };
   const returnSilentFallbackFailureIfNeeded = async (): Promise<ReplyPayload | undefined> => {
