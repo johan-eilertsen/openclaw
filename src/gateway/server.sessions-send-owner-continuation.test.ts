@@ -91,6 +91,7 @@ it.for([
   { flow: "child", outcome: "owner revoked" },
   { flow: "child", outcome: "owner reassigned" },
   { flow: "child", outcome: "new user turn" },
+  { flow: "child", outcome: "new user while waiting" },
   { flow: "peer", outcome: "success" },
   { flow: "peer", outcome: "owner revoked" },
   { flow: "peer", outcome: "owner reassigned" },
@@ -418,6 +419,9 @@ it.for([
         releaseAgentRunDelegatedAuthority(authority);
         clearAgentRunContext(originalRun);
         originalClosed = true;
+        if (outcome === "new user while waiting") {
+          revokeRequesterCronAuthority(parent);
+        }
         childMayFinish.resolve();
       }
       await withinTest(
@@ -430,16 +434,20 @@ it.for([
       );
       // Cross the native accepted-ack yield without advancing run deadlines.
       await vi.advanceTimersByTimeAsync(10);
-      await withinTest(
-        awaitGateBeforeSettlement(
-          pluginEntered.promise,
-          parentFinished.promise,
-          "Requester ended before its plugin could check owner authority",
-        ),
-        signal,
-      );
+      if (outcome === "new user while waiting") {
+        await withinTest(parentFinished.promise, signal);
+      } else {
+        await withinTest(
+          awaitGateBeforeSettlement(
+            pluginEntered.promise,
+            parentFinished.promise,
+            "Requester ended before its plugin could check owner authority",
+          ),
+          signal,
+        );
+        expect(pluginError).toBeUndefined();
+      }
       expect(parentError).toBeUndefined();
-      expect(pluginError).toBeUndefined();
       if (outcome === "owner revoked" || outcome === "owner reassigned") {
         setRuntimeConfigSnapshot({
           ...config,
@@ -466,7 +474,11 @@ it.for([
         expect(fs.readFileSync(effectPath, "utf8")).toBe("authorized effect");
       } else {
         expect(pluginError).toBeInstanceOf(Error);
-        expect(String(pluginError)).toMatch(/owner identity is no longer active/);
+        expect(String(pluginError)).toMatch(
+          outcome === "new user while waiting"
+            ? /owner_authority_required/
+            : /owner identity is no longer active/,
+        );
         expect(effectWrites).toBe(0);
         expect(fs.existsSync(effectPath)).toBe(false);
       }

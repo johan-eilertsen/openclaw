@@ -250,6 +250,13 @@ Supply the message body in the required `message` argument. Hidden aliases such 
 
 `sessions_send` runs another session on the same Gateway and optionally waits for the response. Its `sessionKey`, `label`, or `agentId` selects local model context, not an external destination. A peer's reply reaches the requester once, either inline or as a later inter-session input. Continue the conversation with another `sessions_send`. To post to a channel, use `message` with an explicit channel and target.
 
+A new message while an accepted result is pending does not cancel that result's
+original completion source or move its reply to another conversation. It retires
+the earlier turn's automation entitlement; the result returns under its original
+caller restrictions without borrowing the new turn's owner privileges. Private
+completions remain private. Stop, reset, and revoked completion-source authority
+still prevent delivery.
+
 Waiting sends recover long inline replies from the accepted run's stored answer instead
 of returning its 4,096-character lifecycle preview. If that answer is unavailable,
 `replyTruncated: true` and a note identify the possibly incomplete reply. The normal
