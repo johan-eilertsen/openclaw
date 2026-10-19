@@ -1,6 +1,6 @@
 // Preserve module setup before modules that consume it.
 // oxfmt-ignore
-import { runSubagentStateWorkerOperation, useSubagentControlFixture } from "./subagent-control.test-support.js";
+import { useSubagentControlFixture } from "./subagent-control.test-support.js";
 import { afterEach, beforeEach, expect, it, onTestFinished, vi, type Mock } from "vitest";
 import {
   abortSessionRunTargetWithOutcome,
@@ -20,7 +20,6 @@ import {
   registerTestEmbeddedRun as attachActiveEmbeddedRun,
   createEmbeddedRunHandle,
 } from "../../embedded-agent-runner/runs.test-support.js";
-import { isSubagentRegistryWriteCommand } from "../../subagent-test-fixtures.test-helpers.js";
 import {
   setSubagentAnnounceDeliveryDepsForTest,
   type SubagentAnnounceDeliveryTestDeps,
@@ -35,9 +34,7 @@ import {
 } from "./subagent-progress-draft.test-support.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import { adoptPausedSubagentRunForFollowUp } from "./subagent-registry.js";
-import { rowToSubagentRunRecord } from "./subagent-registry.store.codec.js";
 import { testing as registryTesting } from "./subagent-registry.test-helpers.js";
-import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 const fixture = useSubagentControlFixture();
 beforeEach(async () => {
@@ -54,30 +51,6 @@ afterEach(() => {
   setSubagentAnnounceDeliveryDepsForTest();
   resetSystemEventsForTest();
 });
-
-function rejectRegistryWrites(reject: (row: SubagentRunRecord) => boolean, message: string) {
-  fixture.worker.mockImplementation((context, operation, options) =>
-    runSubagentStateWorkerOperation(
-      context,
-      (scope) =>
-        operation({
-          execute: async (command, executeOptions) => {
-            if (
-              isSubagentRegistryWriteCommand(command) &&
-              command.input.values.some((value) => {
-                const row = rowToSubagentRunRecord(value);
-                return row !== null && reject(row);
-              })
-            ) {
-              throw new Error(message);
-            }
-            return scope.execute(command, executeOptions);
-          },
-        }),
-      options,
-    ),
-  );
-}
 
 async function endRun(runId: string, data: Record<string, unknown> = {}) {
   fixture.capture.mockResolvedValue(CHILD_RESULT);
@@ -461,7 +434,7 @@ it.each([
     }
     expect(subagentRuns.get("a")?.requesterSettleWake?.status).toBe("pending");
     if (write === "rejected") {
-      rejectRegistryWrites(
+      fixture.rejectRegistryWrites(
         (row) => Boolean(row.killIntent) || row.suppressCompletionDelivery === true,
         "stop write rejected",
       );

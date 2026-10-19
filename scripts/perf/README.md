@@ -1,5 +1,40 @@
 # Team-shaped synthetic state
 
+## Startup with one checking agent
+
+The startup benchmark has an opt-in `slowAgentDatabase` case. Prepare each side
+sequentially before the measurement window, then run one cold startup per fixture:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/bench-gateway-startup.ts \
+  --case slowAgentDatabase --fixture-root /path/to/new-fixture --seed-only \
+  --agent-database-mib 512 --agent-gate-delay-ms 10000
+node --import ./scripts/tsx.mjs scripts/bench-gateway-startup.ts \
+  --case slowAgentDatabase --fixture-root /path/to/new-fixture \
+  --runs 1 --warmup 0 --timeout-ms 90000 --output /path/to/result.json
+```
+
+The fixture contains five agents with one interrupted subagent each. All runs
+belong to independent requester sessions owned by the first healthy agent, so
+one parent's unrelated conversations must recover independently. Four agent
+databases are small; the fifth contains the requested MiB of synthetic cache
+payload. Its clean-close seal is removed under offline fixture custody, forcing
+the real integrity scan. A benchmark-only preload delays that scan by the
+requested duration, then executes the original SQLite statement. Use zero delay
+to measure the native scan separately. This simulates a long check without
+writing the incident's tens of gigabytes onto a shared host.
+
+Results retain `/readyz`, the integrity gate's start and completion times, and
+each agent's recovered session status event. The driver waits for all five
+recovery events before teardown and rejects missing observations. No models or
+external channels run. Generate a fresh fixture for every sample; recovery
+mutates the synthetic records. Use separate roots and identical inputs for
+concurrent A/B pairs, with the host's measurement lock and alternating CPU halves.
+The case also requires every healthy agent to recover before the slow integrity
+gate passes, the slow agent to recover afterward, and zero admission errors.
+An unfixed baseline exits nonzero for the ordering failure while still writing
+its measurements; distinguish this expected result from setup or missing data.
+
 Use one fixture for local and sandbox performance repros:
 
 ```sh
@@ -159,6 +194,24 @@ marks reconnect unobserved instead of claiming a reconnect measurement. Counts,
 JSON frame bytes and rates per authenticated socket-minute exclude payloads,
 URLs and authentication. Supply any synthetic token through the normal URL
 fragment. The probe builds nothing and neither starts nor stops the Gateway.
+
+Add a real cron workload with `--cron-runs 12 --cron-jobs 20 --interval-ms 2000`
+and optionally `--screenshot /path/to/runtime-complete.png`. Use a fresh isolated
+Gateway with cron enabled and `agents.defaults.heartbeat.every` set to `"0m"`.
+The probe creates disabled synthetic jobs, then forces runs through `cron.run`;
+system-event payloads and disabled heartbeats keep model providers out of the
+workload. Every forced run must finish and its event must reach the browser.
+A separate configuration-edit phase verifies that a changed job name becomes
+visible. Only browser list requests are counted; the controller socket is
+excluded, and the created jobs are removed on exit.
+
+For paired activity measurements, use `--start-at <epoch-ms>` with the same future
+time on both sides; it gates the runtime window after browser readiness and
+rejects a missed deadline. Hold the host's shared measurement lock, use separate
+Gateway states and ports on the two 16-core CPU halves, then swap the halves for
+the next pair. Compare per-pair request-count differences. This small catalog
+fixture covers the browser event trigger, not production database size, model
+inference, native clients, or a model-catalog mutation.
 
 Build runtime artifacts on the authorized benchmark host, generate an offline
 fixture, then let the measurement driver own its loopback Gateway:
