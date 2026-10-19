@@ -59,7 +59,14 @@ describe("committed requester outcome queue receipts", () => {
     vi.unstubAllEnvs();
   });
 
-  it.each(["pending", "completed", "replaced", "absent"] as const)(
+  it.each([
+    "pending",
+    "completed",
+    "replaced",
+    "requester replaced",
+    "reply policy replaced",
+    "absent",
+  ] as const)(
     "joins the existing %s intent after a published callback fails",
     async (intentState) => {
       const now = Date.now();
@@ -143,8 +150,15 @@ describe("committed requester outcome queue receipts", () => {
           await advanceToIntent();
           expect(deliver).toHaveBeenCalledTimes(1);
           expect(getDeliveryQueueEntryStatus(SESSION_DELIVERY_QUEUE_NAME, id)).toBe("completed");
-        } else if (intentState === "replaced") {
-          const replacement: QueuedSessionDelivery = { ...queued, text: "Replacement intent" };
+        } else if (intentState.includes("replaced")) {
+          const replacement: QueuedSessionDelivery = {
+            ...queued,
+            ...(intentState === "requester replaced"
+              ? { requesterIdentity: { sessionId: "replacement", lifecycleRevision: null } }
+              : intentState === "reply policy replaced"
+                ? { deliver: !queued.deliver }
+                : { text: "Replacement intent" }),
+          };
           upsertDeliveryQueueEntryInDatabase(
             { queueName: SESSION_DELIVERY_QUEUE_NAME, entry: replacement },
             database,
@@ -165,7 +179,7 @@ describe("committed requester outcome queue receipts", () => {
         }
         try {
           const reconciliation = settle(() => {});
-          if (intentState === "replaced" || intentState === "absent") {
+          if (intentState.includes("replaced") || intentState === "absent") {
             await expect(reconciliation).rejects.toThrow(/Requester outcome queue intent/);
           } else {
             await expect(reconciliation).resolves.toEqual({

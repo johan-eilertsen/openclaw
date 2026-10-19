@@ -19,6 +19,7 @@ import { loadSubagentRegistryFromSqlite } from "../registry/subagent-registry-st
 import { bindSubagentRunRecord } from "../registry/subagent-registry.store.codec.js";
 import { writeSubagentRunValuesInDatabase } from "../registry/subagent-registry.store.kernel.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
+import { registerRequesterWakeFollowupTests } from "./subagent-completion-admission.requester-wake-followup.test-support.js";
 import {
   blockSubagentCompletionDelivery,
   mutateRequesterCompletionBatch,
@@ -749,35 +750,7 @@ describe("persisted subagent requester wakes", () => {
     },
   );
 
-  it.each([
-    { status: "failed", outcome: { status: "error" } },
-    { status: "timed_out", outcome: { status: "timeout" } },
-  ] as const)(
-    "settles an uncaptured $status wake without inventing reply capture",
-    async ({ status, outcome }) => {
-      const input = failedRecords(status, outcome);
-      input.subagent.completion = { required: true };
-      persistOwner(input);
-      const before = structuredClone(input);
-      const driver = requesterWakeDriver([input]);
-      try {
-        await driver.run();
-        expect(driver.warn).not.toHaveBeenCalledWith(
-          "failed to persist requester settle wake rejection",
-          expect.any(Object),
-        );
-        database = await reopenCompletionFixtureOwners();
-        const restored = subagentRuns.get(input.subagent.runId)!;
-        expect(restored.requesterSettleWake).toBeUndefined();
-        expect(restored.execution).toEqual(before.subagent.execution);
-        expect(restored.completion).toEqual(before.subagent.completion);
-        expect(systemEvents()).toEqual([]);
-        expect(driver.wake).toHaveBeenCalledOnce();
-      } finally {
-        driver.controller.clearScheduledResumeTimers();
-      }
-    },
-  );
+  registerRequesterWakeFollowupTests({ database: () => database, persistOwner });
 
   it.each(["missing outcome", "paused", "superseded generation"] as const)(
     "does not settle uncaptured completion with %s evidence",

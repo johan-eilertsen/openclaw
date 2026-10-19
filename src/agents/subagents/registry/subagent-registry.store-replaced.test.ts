@@ -4,6 +4,7 @@ import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.
 import { getRuntimeConfig } from "../../../config/config.js";
 import { createGatewayRequestContext } from "../../../gateway/server-request-context.js";
 import { makeContextParams } from "../../../gateway/server-request-context.test-support.js";
+import { sha256Hex } from "../../../infra/crypto-digest.js";
 import { resetHeartbeatEventsForTest } from "../../../infra/heartbeat-events.js";
 import { sqliteWorkerOwnerProbe as probe } from "../../../infra/sqlite-worker-owner-probe.test-support.js";
 import { publishSystemEventStoreResolver } from "../../../infra/system-event-ownership.js";
@@ -137,6 +138,9 @@ it.each([false, true])(
     running.subagent.execution = { status: "running", startedAt: input.subagent.createdAt };
     running.subagent.completion = { required: true };
     const database = openOpenClawStateDatabase();
+    const systemEvents = database.db.prepare(
+      "SELECT * FROM delivery_queue_entries WHERE entry_kind = 'systemEvent' ORDER BY id",
+    );
     seedSubagentCompletionDelivery({ subagent: running.subagent });
     publishCommittedRecords(running.subagent);
     publishSystemEventStoreResolver(() => "replacement-store");
@@ -149,7 +153,7 @@ it.each([false, true])(
       replacement.subagent.childSessionKey = "agent:main:subagent:replacement";
       replacement.subagent.createdAt = now + 1_000;
       replacement.subagent.execution.endedAt = now + 1_500;
-      // A failed sibling retains its wake without queuing a success-expiry alert.
+      // The replacement child owns its failed-result follow-up independently.
       replacement.subagent.execution.outcome = { status: "error", error: "replacement failed" };
       replacement.subagent.runId = "replacement-run";
 
@@ -170,6 +174,18 @@ it.each([false, true])(
       expect(replacementWake).toMatchObject({ status: "pending" });
       vi.setSystemTime(now + 2_000);
     }
+
+    const systemEventsBeforeOldCompletion = systemEvents.all();
+    expect(systemEventsBeforeOldCompletion).toEqual(
+      overlappingWake
+        ? [
+            expect.objectContaining({
+              id: sha256Hex("subagent-completion-blocked:replacement-run:generation:1"),
+              status: "pending",
+            }),
+          ]
+        : [],
+    );
 
     seedSubagentCompletionDelivery({ subagent: input.subagent });
     publishCommittedRecords(input.subagent);
@@ -209,11 +225,7 @@ it.each([false, true])(
         replacementWake,
       );
     }
-    expect(
-      database.db
-        .prepare("SELECT id FROM delivery_queue_entries WHERE entry_kind = 'systemEvent'")
-        .all(),
-    ).toEqual([]);
+    expect(systemEvents.all()).toEqual(systemEventsBeforeOldCompletion);
     expect(loadSubagentRegistryFromSqlite().get(input.subagent.runId)).toMatchObject({
       completion: { resultText: "canonical result" },
       delivery: {

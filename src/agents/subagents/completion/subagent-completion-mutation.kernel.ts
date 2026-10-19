@@ -12,6 +12,7 @@ import {
 } from "../../../infra/session-delivery-queue.records.js";
 import { resolveEventSessionKey } from "../../../routing/session-key.js";
 import type { OpenClawStateDatabase } from "../../../state/openclaw-state-db-contract.js";
+import { projectRuntimeContextFragments } from "../../internal-runtime-context.js";
 import {
   consumeSubagentPauseNotice,
   completeRequesterSettleWakeState,
@@ -41,6 +42,10 @@ import {
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import { sameRequesterSettleRunIdentity } from "../registry/subagent-requester-settle-identity.js";
 import { compareSubagentRunGeneration } from "../registry/subagent-run-generation.js";
+import {
+  SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION,
+  SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION,
+} from "./subagent-completion-instructions.js";
 import type {
   BlockSubagentCompletionRequest,
   SubagentCompletionMutation,
@@ -51,6 +56,7 @@ import {
   readSubagentCompletionQueueReceipt,
   reconcileSubagentCompletionQueueReceipts,
 } from "./subagent-completion-queue-receipt.js";
+import { resolveSubagentCompletionResultText } from "./subagent-completion-result.js";
 
 const SUSPENDED_RETENTION_MS = 7 * 24 * 60 * 60_000;
 type CompletionMutation = {
@@ -198,6 +204,13 @@ function prepareBlockedSubagentCompletion(
     nextAttemptAt: undefined,
     queueId: undefined,
   });
+  // Preserve the admitted reply policy before settlement retires the wake.
+  const wake = subagent.requesterSettleWake;
+  const yieldedFinalDeliverable =
+    wake?.yieldedFinalDeliverable === true &&
+    (wake.afterRequesterYield === true ||
+      (wake.requesterYieldBatch === true && wake.rearmGeneration !== undefined));
+  const privateFollowup = subagent.completionTarget === "parent" && !yieldedFinalDeliverable;
   Object.assign(subagent, { cleanupHandled: false, wakeOnDescendantSettle: undefined });
   if (params.storeReplaced) {
     subagent.requesterSettleWake = undefined;
@@ -214,17 +227,45 @@ function prepareBlockedSubagentCompletion(
   } else {
     subagent.suppressCompletionDelivery = true;
   }
-  const text =
-    successful && !params.storeReplaced
-      ? "Subagent completion delivery is blocked: " + params.reason
-      : null;
-  const queued = text
+  // Failed and timed-out children still owe their requester a review. Retiring
+  // the settle wake must transfer that obligation to the durable event owner.
+  // Only this settlement can revoke the wake: a parent-only child may retain
+  // intentional non-delivery from its earlier, suppressed direct announcement.
+  // Explicit cancellation and revoked delivery must never become fresh work.
+  const notifyRequester =
+    !params.storeReplaced &&
+    params.disposition !== "intentional_non_delivery" &&
+    subagent.endedReason !== SUBAGENT_ENDED_REASON_KILLED &&
+    subagent.suppressAnnounceReason !== "steer-restart" &&
+    !subagent.killReconciliation?.suppressTaskDelivery;
+  const queued = notifyRequester
     ? prepareClaimedSessionDelivery(
         {
           kind: "systemEvent",
           sessionKey: resolveEventSessionKey(subagent.requesterSessionKey),
+          requesterIdentity: {
+            sessionId: subagent.completionRequesterSessionId ?? "",
+            lifecycleRevision: subagent.completionRequesterLifecycleRevision ?? null,
+          },
+          deliver: !privateFollowup,
           ...(subagent.requesterAgentId ? { agentId: subagent.requesterAgentId } : {}),
-          text,
+          text: projectRuntimeContextFragments([
+            {
+              kind: "runtime-instruction",
+              text: `Subagent completion delivery is blocked. ${privateFollowup ? SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION : SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} Review the recorded outcome before continuing; do not blindly repeat work or an update already delivered. Keep internal details private.`,
+            },
+            {
+              kind: "conversation-data",
+              text: JSON.stringify({
+                runId: subagent.runId,
+                childSessionKey: subagent.childSessionKey,
+                task: subagent.task,
+                outcome: subagent.execution.outcome,
+                result: resolveSubagentCompletionResultText(subagent) ?? null,
+                deliveryError: params.reason,
+              }),
+            },
+          ]),
           ...(subagent.requesterOrigin ? { deliveryContext: subagent.requesterOrigin } : {}),
           idempotencyKey: `subagent-completion-blocked:${subagent.runId}:generation:${generation}`,
         },
