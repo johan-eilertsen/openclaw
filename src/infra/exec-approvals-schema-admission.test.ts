@@ -3,6 +3,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { AuditWriterRequest } from "../audit/audit-event-writer.types.js";
 import { prepareExecutionIdentityContextAtAdmission } from "../audit/execution-identity.test-support.js";
+import { saveCronStore } from "../cron/store.js";
+import { makeStore } from "../cron/store.test-support.js";
 import { insertOperatorApproval } from "../gateway/operator-approval-store.js";
 import { listAgentProvenance } from "../state/agent-provenance.js";
 import {
@@ -11,10 +13,14 @@ import {
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
-import { executeOpenClawStateWorker } from "../state/openclaw-state-worker-store.js";
+import {
+  executeOpenClawStateWorker,
+  runOpenClawStateWorkerOperation,
+} from "../state/openclaw-state-worker-store.js";
 import { listProfiles } from "../state/user-profile-reads.js";
 import { commitExecAuthorizationLocked } from "./exec-approvals-authorization.js";
 import { writeExecApprovalsConfigRow } from "./exec-approvals-sqlite.js";
+import { createSqliteWorkerWriteAdmission } from "./sqlite-worker-store.js";
 
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
   afterEach(async () => {
@@ -66,9 +72,40 @@ async function audit(env: NodeJS.ProcessEnv, input: AuditWriterRequest) {
   expect(result).toEqual({ status: "settled" });
 }
 
-type Surface = "roster" | "profiles" | "approval binding" | "message progress" | "message binding";
+type Surface =
+  | "roster"
+  | "profiles"
+  | "approval binding"
+  | "message progress"
+  | "message binding"
+  | "cron receipts"
+  | "cron runtime authority";
 async function useFeature(surface: Surface, env: NodeJS.ProcessEnv, id: string) {
-  if (surface === "roster") {
+  if (surface === "cron runtime authority") {
+    const store = makeStore(id, true);
+    const job = store.jobs[0];
+    job.sessionTarget = "isolated";
+    job.payload = { kind: "agentTurn", message: "synthetic scheduled task", toolsAllow: ["read"] };
+    job.runtimeAuthority = {
+      version: 1,
+      runtimeId: "synthetic",
+      namespace: "synthetic.apps",
+      payload: {},
+    };
+    await saveCronStore(path.join(env.OPENCLAW_STATE_DIR!, "cron", "jobs.json"), store);
+  } else if (surface === "cron receipts") {
+    const context = captureOpenClawStateWorkerContext({ env });
+    await runOpenClawStateWorkerOperation(
+      context,
+      (scope) => scope.execute({ type: "cron.initializeRunReceipts", input: {} }),
+      {
+        assertCurrent: context.admission.assertCurrent,
+        createAdmission: createSqliteWorkerWriteAdmission(context.admission.assertCurrent, [
+          context.admission.databasePath,
+        ]),
+      },
+    );
+  } else if (surface === "roster") {
     expect(await listAgentProvenance({ env })).toEqual([]);
   } else if (surface === "profiles") {
     expect(await listProfiles({ env })).toEqual([]);
@@ -133,38 +170,43 @@ async function useFeature(surface: Surface, env: NodeJS.ProcessEnv, id: string) 
   }
 }
 
-it.each<Surface>(["roster", "profiles", "approval binding", "message progress", "message binding"])(
-  "keeps prepared exec authority through the first %s operation after reopen",
-  async (surface) => {
-    const { env } = fixture();
-    if (surface === "message binding") {
-      prepareExecutionIdentityContextAtAdmission(
-        {
-          runId: token.runId,
-          agentId: "main",
-          ingress: { kind: "local-cli", boundary: "agent-command.local", state: "present" },
-          runtime: { kind: "embedded" },
-        },
-        {
-          env,
-          contextId: token.contextId,
-          executionId: token.executionId,
-          runtimeInstanceId: "integrity-runtime",
-          now: token.createdAt,
-        },
-      );
-    }
-    await useFeature(surface, env, "prime");
-    await closeOpenClawStateDatabaseAsync();
-    const source = openOpenClawStateDatabase({ env });
-    const before = source.db.prepare("PRAGMA schema_version").get();
-    const assertCurrent = await prepareExec();
-    expect(assertCurrent).not.toThrow();
-    await useFeature(surface, env, "after-authorization");
-    expect(source.db.prepare("PRAGMA schema_version").get()).toEqual(before);
-    expect(assertCurrent).not.toThrow();
-  },
-);
+it.each<Surface>([
+  "roster",
+  "profiles",
+  "approval binding",
+  "message progress",
+  "message binding",
+  "cron receipts",
+  "cron runtime authority",
+])("keeps prepared exec authority through the first %s operation after reopen", async (surface) => {
+  const { env } = fixture();
+  if (surface === "message binding") {
+    prepareExecutionIdentityContextAtAdmission(
+      {
+        runId: token.runId,
+        agentId: "main",
+        ingress: { kind: "local-cli", boundary: "agent-command.local", state: "present" },
+        runtime: { kind: "embedded" },
+      },
+      {
+        env,
+        contextId: token.contextId,
+        executionId: token.executionId,
+        runtimeInstanceId: "integrity-runtime",
+        now: token.createdAt,
+      },
+    );
+  }
+  await useFeature(surface, env, "prime");
+  await closeOpenClawStateDatabaseAsync();
+  const source = openOpenClawStateDatabase({ env });
+  const before = source.db.prepare("PRAGMA schema_version").get();
+  const assertCurrent = await prepareExec();
+  expect(assertCurrent).not.toThrow();
+  await useFeature(surface, env, "after-authorization");
+  expect(source.db.prepare("PRAGMA schema_version").get()).toEqual(before);
+  expect(assertCurrent).not.toThrow();
+});
 
 it("revokes prepared exec authority when a worker actually creates missing schema", async () => {
   const { env } = fixture();

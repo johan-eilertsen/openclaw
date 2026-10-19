@@ -8,6 +8,7 @@ import {
   getNodeSqliteKysely,
   sqliteStringSet,
 } from "../../infra/kysely-sync.js";
+import { createSqliteSchemaEnsurer } from "../../infra/sqlite-schema-ensure.js";
 import { extractSqliteTableSchema } from "../../infra/sqlite-schema-sql.js";
 import { tableExists } from "../../state/openclaw-state-db-schema-helpers.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../../state/openclaw-state-db.generated.js";
@@ -20,9 +21,9 @@ import type { CronStoredJob, CronToolsAllowProvenance } from "../types.js";
 const CRON_RUNTIME_AUTHORITY_TABLE = "cron_job_runtime_authorities";
 const CRON_RUNTIME_AUTHORITY_FINGERPRINT_VERSION = 1;
 
-const CRON_RUNTIME_AUTHORITY_SCHEMA_SQL = extractSqliteTableSchema(
-  OPENCLAW_STATE_SCHEMA_SQL,
-  CRON_RUNTIME_AUTHORITY_TABLE,
+const ensureCronRuntimeAuthorityTable = createSqliteSchemaEnsurer(
+  () => extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, CRON_RUNTIME_AUTHORITY_TABLE),
+  { tables: [CRON_RUNTIME_AUTHORITY_TABLE] },
 );
 
 type CronAuthorityDatabase = Pick<
@@ -68,12 +69,6 @@ function cronRuntimeAuthorityInputFingerprint(job: CronStoredJob): string {
   return `v${CRON_RUNTIME_AUTHORITY_FINGERPRINT_VERSION}:${createHash("sha256")
     .update(JSON.stringify(canonical), "utf8")
     .digest("hex")}`;
-}
-
-/** Creates the additive table only when authority state is first persisted. */
-function ensureCronRuntimeAuthorityTable(db: DatabaseSync): void {
-  // sqlite-allow-raw -- feature-local additive schema DDL; data access uses Kysely.
-  db.exec(CRON_RUNTIME_AUTHORITY_SCHEMA_SQL);
 }
 
 function loadCronRuntimeAuthorityRows(

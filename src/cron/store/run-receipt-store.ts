@@ -15,6 +15,7 @@ import {
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../../infra/kysely-sync.js";
+import { createSqliteSchemaEnsurer } from "../../infra/sqlite-schema-ensure.js";
 import { extractSqliteTableSchema } from "../../infra/sqlite-schema-sql.js";
 import { getFileLockProcessStartTime, isPidDefinitelyDead } from "../../shared/pid-alive.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "../../state/openclaw-state-schema.js";
@@ -112,15 +113,18 @@ export const {
   releaseLocalCronRunReceiptOwnership,
 } = settlement;
 
-export function ensureCronRunReceiptSchema(database: DatabaseSync): void {
-  // sqlite-allow-raw -- Canonical feature-local additive DDL only.
-  database.exec(
+// Redundant DDL revokes profile authority retained by an active manual run.
+export const ensureCronRunReceiptSchema = createSqliteSchemaEnsurer(
+  () =>
     extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, "cron_run_receipts", {
       endMarker: "ON cron_run_receipts(store_key, job_id, started_at_ms DESC, receipt_id DESC);",
       errorMessage: "OpenClaw cron run receipt schema marker is missing.",
     }),
-  );
-}
+  {
+    tables: ["cron_run_receipts"],
+    indexes: ["idx_cron_run_receipts_active_job", "idx_cron_run_receipts_job_history"],
+  },
+);
 
 function query(database: DatabaseSync) {
   return getNodeSqliteKysely<CronRunReceiptDatabase>(database);
