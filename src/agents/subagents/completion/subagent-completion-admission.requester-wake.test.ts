@@ -156,42 +156,46 @@ describe("persisted subagent requester wakes", () => {
     },
   );
 
-  it("settles lost operator authority without discarding child results or queuing a notice", async () => {
-    const input = armRequesterWake(records());
-    input.subagent.cleanupCompletedAt = undefined;
-    persistOwner(input);
-    const before = structuredClone(input.subagent);
+  it.each(["ok", "error", "timeout"] as const)(
+    "settles lost operator authority without discarding %s child results or queuing a notice",
+    async (status) => {
+      const input = armRequesterWake(records());
+      input.subagent.execution.outcome = { status };
+      input.subagent.cleanupCompletedAt = undefined;
+      persistOwner(input);
+      const before = structuredClone(input.subagent);
 
-    await mutateRequesterCompletionBatch({
-      entries: [input.subagent],
-      operation: {
-        kind: "settle",
-        outcome: {
-          delivered: false,
-          path: "none",
-          disposition: "permanent_failure",
-          reason: "operator_authority_unavailable",
-          error: "The original operator no longer has access",
+      await mutateRequesterCompletionBatch({
+        entries: [input.subagent],
+        operation: {
+          kind: "settle",
+          outcome: {
+            delivered: false,
+            path: "none",
+            disposition: "permanent_failure",
+            reason: "operator_authority_unavailable",
+            error: "The original operator no longer has access",
+          },
         },
-      },
-      assertCurrent: () => {},
-      databaseOptions: { database },
-    });
+        assertCurrent: () => {},
+        databaseOptions: { database },
+      });
 
-    database = await reopenCompletionFixtureOwners();
-    const restored = subagentRuns.get(input.subagent.runId)!;
-    expect(restored.requesterSettleWake).toBeUndefined();
-    expect(restored.execution).toEqual(before.execution);
-    expect(restored.completion).toEqual(before.completion);
-    expect(restored.delivery).toMatchObject({
-      status: "failed",
-      disposition: "permanent_failure",
-      lastError: "The original operator no longer has access",
-    });
-    expect(restored.delivery?.queueId).toBeUndefined();
-    expect(restored.suppressCompletionDelivery).toBe(true);
-    expect(readCompletionSystemEvents(database)).toEqual([]);
-  });
+      database = await reopenCompletionFixtureOwners();
+      const restored = subagentRuns.get(input.subagent.runId)!;
+      expect(restored.requesterSettleWake).toBeUndefined();
+      expect(restored.execution).toEqual(before.execution);
+      expect(restored.completion).toEqual(before.completion);
+      expect(restored.delivery).toMatchObject({
+        status: "failed",
+        disposition: "permanent_failure",
+        lastError: "The original operator no longer has access",
+      });
+      expect(restored.delivery?.queueId).toBeUndefined();
+      expect(restored.suppressCompletionDelivery).toBe(true);
+      expect(readCompletionSystemEvents(database)).toEqual([]);
+    },
+  );
 
   it("settles a rejected dispatch transition after rollback without another wake", async () => {
     const input = armRequesterWake(records());
@@ -723,36 +727,6 @@ describe("persisted subagent requester wakes", () => {
         database.db.exec("DROP TRIGGER IF EXISTS reject_outcome");
         driver.controller.clearRuntimeState();
         vi.useRealTimers();
-      }
-    },
-  );
-
-  it.each([
-    { status: "failed", outcome: { status: "error" } },
-    { status: "timed_out", outcome: { status: "timeout" } },
-  ] as const)(
-    "settles an uncaptured $status wake without inventing reply capture",
-    async ({ status, outcome }) => {
-      const input = failedRecords(status, outcome);
-      input.subagent.completion = { required: true };
-      persistOwner(input);
-      const before = structuredClone(input);
-      const driver = requesterWakeDriver([input]);
-      try {
-        await driver.run();
-        expect(driver.warn).not.toHaveBeenCalledWith(
-          "failed to persist requester settle wake rejection",
-          expect.any(Object),
-        );
-        database = await reopenCompletionFixtureOwners();
-        const restored = subagentRuns.get(input.subagent.runId)!;
-        expect(restored.requesterSettleWake).toBeUndefined();
-        expect(restored.execution).toEqual(before.subagent.execution);
-        expect(restored.completion).toEqual(before.subagent.completion);
-        expect(readCompletionSystemEvents(database)).toEqual([]);
-        expect(driver.wake).toHaveBeenCalledOnce();
-      } finally {
-        driver.controller.clearRuntimeState();
       }
     },
   );

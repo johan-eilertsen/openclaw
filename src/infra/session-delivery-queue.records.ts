@@ -55,6 +55,10 @@ export type QueuedSessionDeliveryPayload =
       /** Preserves ownership when a durable event targets the literal global session. */
       agentId?: string;
       text: string;
+      /** A retained completion may only resume the requester incarnation that produced it. */
+      requesterIdentity?: Pick<SessionDeliveryRequesterBinding, "sessionId" | "lifecycleRevision">;
+      /** Preserve an explicitly private producer's automatic-delivery policy. */
+      deliver?: boolean;
       deliveryContext?: SessionDeliveryContext;
       idempotencyKey?: string;
     } & SessionDeliveryRetryPolicy)

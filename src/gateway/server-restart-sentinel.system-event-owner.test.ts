@@ -160,8 +160,115 @@ it.each(cases)(
     );
     expectResearchEvent({ agentId: "research", sessionKey: "global" });
     expect(entry).toEqual(original);
+    expect(mocks.enqueueSessionEvent.mock.calls[0]?.[1]).not.toHaveProperty("deliver");
   }),
 );
+
+it.each([
+  {
+    name: "replaced session",
+    original: { sessionId: "old-session", lifecycleRevision: null },
+    current: { sessionId: "current-session" },
+  },
+  {
+    name: "reset lifecycle on the same session",
+    original: { sessionId: "current-session", lifecycleRevision: "original-revision" },
+    current: { sessionId: "current-session", lifecycleRevision: "replacement-revision" },
+  },
+  {
+    name: "missing original identity",
+    original: { sessionId: "", lifecycleRevision: null },
+    current: { sessionId: "" },
+  },
+])("rejects bound completion events for a $name before adoption", async ({ original, current }) => {
+  await withOpenClawTestState(
+    { label: "restart-completion-identity", layout: "state-only" },
+    async () => {
+      setRuntimeConfigSnapshot({});
+      mockEventSession();
+      mocks.captureSessionEventTarget.mockImplementationOnce(async (agentId, sessionKey) => ({
+        agentId,
+        sessionKey,
+        generation: "restart-event-test",
+        ...current,
+      }));
+      const eventQueueContext = captureOpenClawStateWorkerContext();
+      const id = await queueStorage.enqueueSessionDelivery(
+        {
+          kind: "systemEvent",
+          sessionKey: "agent:main:main",
+          text: "private child findings",
+          requesterIdentity: original,
+          deliver: false,
+          deliveryContext,
+        },
+        eventQueueContext,
+      );
+      const onSettled = vi.fn();
+      await drainPendingSessionDelivery({
+        id,
+        queueContext: eventQueueContext,
+        bypassBackoff: true,
+        logLabel: "bound completion identity",
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        deliver: (entry) =>
+          deliverQueuedSessionDelivery({ deps: {}, entry, queueContext: eventQueueContext }),
+        onSettled,
+      });
+
+      expect(mocks.enqueueSessionEvent).not.toHaveBeenCalled();
+      expect(onSettled).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ id }),
+        "moved-to-failed",
+        eventQueueContext,
+      );
+      expect(await queueStorage.loadPendingSessionDelivery(id, eventQueueContext)).toBeNull();
+    },
+  );
+});
+
+it("keeps a bound private completion silent and retains the captured physical target", async () => {
+  const handoff = await vi.importActual<
+    typeof import("../auto-reply/reply/session-event-handoff.js")
+  >("../auto-reply/reply/session-event-handoff.js");
+  mocks.captureSessionEventTarget.mockImplementation(handoff.captureSessionEventTargetForHost);
+  await withOpenClawTestState(
+    { label: "restart-private-completion", layout: "state-only" },
+    async () => {
+      setRuntimeConfigSnapshot({});
+      const sessionKey = "agent:main:main";
+      mockEventSession();
+      await replaceSessionEntry(
+        { agentId: "main", sessionKey },
+        { sessionId: "current-session", updatedAt: 1 },
+      );
+      const eventQueueContext = captureOpenClawStateWorkerContext();
+      const id = await queueStorage.enqueueSessionDelivery(
+        {
+          kind: "systemEvent",
+          sessionKey,
+          text: "private child findings",
+          requesterIdentity: { sessionId: "current-session", lifecycleRevision: null },
+          deliver: false,
+          deliveryContext,
+        },
+        eventQueueContext,
+      );
+      const entry = (await queueStorage.loadPendingSessionDelivery(id, eventQueueContext))!;
+      await deliverQueuedSessionDelivery({ deps: {}, entry, queueContext: eventQueueContext });
+
+      expect(mocks.captureSessionEventTarget).toHaveBeenCalledOnce();
+      expect(mocks.enqueueSessionEvent).toHaveBeenCalledExactlyOnceWith(
+        "private child findings",
+        expect.objectContaining({ deliver: false, deliveryContext }),
+      );
+      // The real capture stores physical database authority in a WeakMap keyed by
+      // this object; copying its visible fields would lose that authority.
+      const capturedTarget = await mocks.captureSessionEventTarget.mock.results[0]!.value;
+      expect(mocks.enqueueSessionEvent.mock.calls[0]?.[1].expectedTarget).toBe(capturedTarget);
+    },
+  );
+});
 
 it(
   "resolves the persisted owner of a global session",
