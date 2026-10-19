@@ -27,6 +27,7 @@ function fixture(accepted = true) {
     runId: "first",
     requesterSessionKey: "A",
     requesterSessionId: "A-session",
+    requesterStorePath: "/synthetic/requester/sessions.json",
     requesterAgentId: "main",
     requesterTurnRunId: "requester-turn",
     visibleReply: true,

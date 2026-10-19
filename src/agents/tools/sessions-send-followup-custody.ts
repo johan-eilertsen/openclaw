@@ -154,15 +154,29 @@ export async function prepareSessionsSendFollowup(params: {
         return [target.canonicalKey, target.storeKey, ...target.storeKeys];
       }),
     );
-    const incarnations = facts.map((read) => read.readCurrent(cfg).target);
+    const incarnations = facts.map((read) => ({ read, target: read.readCurrent(cfg).target }));
     stopIdentityWatch = onSessionIdentityMutation((change) => {
       if (
-        incarnations.some(
-          (target) =>
-            target.agentId === change.agentId &&
-            target.entry.sessionId === change.previous.sessionId &&
-            change.previous.sessionKeys.some((key) => target.storeKeys.includes(key)),
-        )
+        incarnations.some(({ read, target }) => {
+          if (
+            target.agentId !== change.agentId ||
+            target.entry.sessionId !== change.previous.sessionId ||
+            !change.previous.sessionKeys.some((key) => target.storeKeys.includes(key))
+          ) {
+            return false;
+          }
+          if (target.readSource) {
+            return target.readSource.databaseIdentity === change.databaseIdentity;
+          }
+          // Memory-only readers fence their own actor without publishing a disk source.
+          try {
+            return (
+              read.readCurrent(getRuntimeConfig()).target.entry.sessionId !== target.entry.sessionId
+            );
+          } catch {
+            return true;
+          }
+        })
       ) {
         revoked.abort(
           new FollowupAccessChangedError("Followup conversation was reset or replaced."),
@@ -214,6 +228,7 @@ export async function prepareSessionsSendFollowup(params: {
       runId: params.runId,
       requesterSessionKey: params.requesterSessionKey,
       requesterSessionId,
+      requesterStorePath: facts[0]!.storageTarget.storePath,
       requesterTurnRunId: params.requesterTurnRunId,
       visibleReply: params.visibleReply,
       requesterAuthority,

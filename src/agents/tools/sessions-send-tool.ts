@@ -21,7 +21,6 @@ import {
   classifySessionKeyShape,
   isUnscopedSessionKeySentinel,
   normalizeAgentId,
-  normalizeAgentIdStrict,
 } from "../../routing/session-key.js";
 import { isCronRunSessionKey, parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
@@ -36,7 +35,6 @@ import {
 } from "../tool-description-presets.js";
 import { ToolInputError } from "../tool-input-error.js";
 import type { AnyAgentTool } from "./common.js";
-import { readToolStringParam } from "./common.js";
 import { wrapGatewayPersonalToolExecution } from "./gateway-caller-context.js";
 import { callAgentToolGatewayRequest } from "./in-process-gateway.js";
 import {
@@ -79,6 +77,7 @@ import {
 import {
   readSessionsSendMessage,
   readSessionsSendMode,
+  readSessionsSendTarget,
   readSessionsSendTimeout,
 } from "./sessions-send-tool.input.js";
 import { prepareSessionsSendPrompt } from "./sessions-send-tool.prompt.js";
@@ -136,18 +135,11 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       }
       const { readTarget: readSession, readRequester } = createSessionsSendSessionReaders(cfg);
 
-      const sessionKeyParam = readToolStringParam(params, "sessionKey");
-      const labelParam = readToolStringParam(params, "label");
-      const labelAgentIdInput = readToolStringParam(params, "agentId");
-      const normalizedLabelAgentId =
-        labelAgentIdInput === undefined ? null : normalizeAgentIdStrict(labelAgentIdInput);
-      if (normalizedLabelAgentId && !normalizedLabelAgentId.ok) {
-        return sendFailure(
-          "error",
-          `Agent "${labelAgentIdInput}" not found. Run openclaw agents list to see configured agents.`,
-        );
+      const targetInput = readSessionsSendTarget(params);
+      if (!targetInput.ok) {
+        return sendFailure("error", targetInput.error);
       }
-      const explicitTargetAgentId = normalizedLabelAgentId?.value;
+      const { sessionKeyParam, labelParam, labelAgentIdInput, explicitTargetAgentId } = targetInput;
 
       let sessionKey = sessionKeyParam;
       let resolvedTargetAgentId: string | undefined;
@@ -168,7 +160,6 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       }
       if (!sessionKey && labelParam) {
         const requestedAgentId = explicitTargetAgentId;
-
         if (restrictToSpawned && requestedAgentId && requestedAgentId !== requesterAgentId) {
           return sendFailure(
             "forbidden",
@@ -222,13 +213,12 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
         }
 
         if (!resolvedKey) {
-          if (restrictToSpawned) {
-            return sendFailure(
-              "forbidden",
-              "Session not visible from this sandboxed agent session.",
-            );
-          }
-          return sendFailure("error", `No session found with label: ${labelParam}`);
+          return sendFailure(
+            restrictToSpawned ? "forbidden" : "error",
+            restrictToSpawned
+              ? "Session not visible from this sandboxed agent session."
+              : `No session found with label: ${labelParam}`,
+          );
         }
         sessionKey = resolvedKey;
         resolvedLabelKey = resolvedKey;
@@ -237,11 +227,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       if (!sessionKey) {
         return sendFailure("error", "Either sessionKey or label is required");
       }
-      const allowMissingKey = isConfiguredAgentMainSessionKey({
-        cfg,
-        sessionKey,
-        mainKey,
-      });
+      const allowMissingKey = isConfiguredAgentMainSessionKey({ cfg, sessionKey, mainKey });
       const resolvedSession = resolvedLabelKey
         ? {
             ok: true as const,
@@ -306,7 +292,6 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       }
       let resolvedKey = visibleSession.key;
       const displayKey = visibleSession.displayKey;
-      const resolvedKeyAgentId = parseAgentSessionKey(resolvedKey)?.agentId;
       const isLiteralLegacyKeyInput =
         !labelParam && sessionKeyParam !== undefined && !resolvedSession.resolvedViaSessionId;
       const isLiteralUnscopedTarget =
@@ -347,7 +332,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
       const targetAgentId =
         (persistedTargetOwner.kind === "configured" ? persistedTargetOwner.agentId : undefined) ??
         resolvedTargetOwner ??
-        resolvedKeyAgentId ??
+        parseAgentSessionKey(resolvedKey)?.agentId ??
         (isLiteralUnscopedMainTarget ? requesterAgentId : undefined) ??
         compatibilityTargetAgentId;
       if (!targetAgentId) {
@@ -612,7 +597,9 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
             const ownChild = targetSessionEntry?.spawnedBy === requesterSession.canonicalKey;
             const startParams: Parameters<typeof dispatchSessionsSendFollowup>[0] = {
               cfg,
+              admissionConfig: communication.admissionConfig,
               callGateway: communication.callGateway,
+              captureReplyAdmission: communication.captureReplyAdmission,
               runId,
               mode,
               sendParams,

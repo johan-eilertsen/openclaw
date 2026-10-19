@@ -60,6 +60,11 @@ const input = {
 };
 const facts = new Map<string, PreparedSessionMutationFacts>();
 const active: FollowupRequest[] = [];
+const storageOwner = { agentId: "main", storePath: "/synthetic/agent.sqlite" };
+const storageTarget = (canonicalKey: string) => ({
+  ...storageOwner,
+  canonicalKey,
+});
 beforeEach(() => {
   mocks.config.mockReturnValue({ ...rolePolicyConfig(), agents: { entries: { main: {} } } });
   mocks.client.mockReturnValue(sharingPolicyClient({ user: "requester" }));
@@ -80,11 +85,14 @@ beforeEach(() => {
     facts.set(sessionKey, {
       membership: new Set(["requester"]),
       target: {
-        agentId: "main",
-        canonicalKey: sessionKey,
+        ...storageTarget(sessionKey),
+        readSource: {
+          agentId: "main",
+          path: storageOwner.storePath,
+          databaseIdentity: "fixture",
+        },
         storeKey: sessionKey,
         storeKeys: [sessionKey],
-        storePath: "/synthetic/agent.sqlite",
         entry: {
           sessionId: sessionKey + "-id",
           lifecycleRevision: "one",
@@ -100,11 +108,7 @@ beforeEach(() => {
     });
   }
   mocks.prepare.mockImplementation(async ({ sessionKey }: { sessionKey: string }) => ({
-    storageTarget: {
-      agentId: "main",
-      canonicalKey: sessionKey,
-      storePath: "/synthetic/agent.sqlite",
-    },
+    storageTarget: storageTarget(sessionKey),
     readCurrent: () => facts.get(sessionKey),
     release: () => {},
   }));
@@ -124,11 +128,7 @@ async function prepare() {
   return request;
 }
 function target() {
-  const value = facts.get(input.targetSessionKey);
-  if (!value?.target) {
-    throw new Error("Missing fixture target");
-  }
-  return value;
+  return facts.get(input.targetSessionKey)!;
 }
 describe("followup retained session authorization", () => {
   it.each(["required", "optional", "no route", "steer"] as const)(
@@ -149,6 +149,7 @@ describe("followup retained session authorization", () => {
       const result = await dispatchSessionsSendFollowup(
         {
           cfg: mocks.config(),
+          admissionConfig: mocks.config(),
           callGateway,
           runId: input.runId,
           mode: scope === "steer" ? "steer" : undefined,
@@ -224,6 +225,67 @@ describe("followup retained session authorization", () => {
     expect(mocks.release).toHaveBeenCalledOnce();
   });
 
+  it.each([input.requesterSessionKey, input.targetSessionKey])(
+    "ignores another database's reset before retiring the captured source %s",
+    async (sessionKey) => {
+      const request = await prepare();
+      const owner = SessionFollowupCompletion.bind(request);
+      owner.markAccepted(input.runId);
+      const change = {
+        agentId: "main",
+        kind: "reset" as const,
+        previous: { sessionId: `${sessionKey}-id`, sessionKeys: [sessionKey] },
+        current: { sessionId: "replacement", sessionKeys: [sessionKey] },
+      };
+      try {
+        emitSessionIdentityMutation({ ...change, databaseIdentity: "other-database" });
+        expect(owner.signal.aborted).toBe(false);
+        expect(() => request.custody.assertCurrent()).not.toThrow();
+        expect(mocks.release).not.toHaveBeenCalled();
+
+        emitSessionIdentityMutation({ ...change, databaseIdentity: "fixture" });
+        expect(owner.signal.aborted).toBe(true);
+        expect(() => request.custody.assertCurrent()).toThrow("reset or replaced");
+        expect(mocks.release).toHaveBeenCalledOnce();
+      } finally {
+        owner.close();
+      }
+    },
+  );
+
+  it("uses the retained reader for reset of a source without disk identity", async () => {
+    const original = target();
+    original.target!.readSource = undefined;
+    const request = await prepare();
+    const owner = SessionFollowupCompletion.bind(request);
+    owner.markAccepted(input.runId);
+    const change = {
+      agentId: "main",
+      kind: "reset" as const,
+      previous: {
+        sessionId: original.target!.entry.sessionId,
+        sessionKeys: [input.targetSessionKey],
+      },
+      current: { sessionId: "replacement", sessionKeys: [input.targetSessionKey] },
+    };
+    try {
+      emitSessionIdentityMutation({ ...change, databaseIdentity: Symbol("unrelated actor") });
+      expect(owner.signal.aborted).toBe(false);
+      facts.set(input.targetSessionKey, {
+        ...original,
+        target: {
+          ...original.target!,
+          entry: { ...original.target!.entry, sessionId: "replacement" },
+        },
+      });
+      emitSessionIdentityMutation({ ...change, databaseIdentity: Symbol("reset actor") });
+      expect(owner.signal.aborted).toBe(true);
+      expect(mocks.release).toHaveBeenCalledOnce();
+    } finally {
+      owner.close();
+    }
+  });
+
   it("retains exact requester incarnation and route when an accepted start loses its ACK", async () => {
     const request = await prepare();
     const unexpected = () => {
@@ -257,22 +319,19 @@ describe("followup retained session authorization", () => {
       request.completion = completion;
       throw new Error("accepted but transport ACK lost");
     });
+    const { runId, ...keys } = input;
+    const requesterSession = { sessionId: "requester-id", lifecycleRevision: "requester-revision" };
     const replyContext = {
+      ...keys,
       callGateway,
-      targetSessionKey: input.targetSessionKey,
-      targetAgentId: "main",
       displayKey: input.targetSessionKey,
       replyTimeoutMs: 30000,
       replyMode: "one-way" as const,
-      requesterSessionKey: input.requesterSessionKey,
-      requesterAgentId: input.requesterAgentId,
-      requesterSession: { sessionId: "requester-id", lifecycleRevision: "requester-revision" },
+      requesterSession,
       requesterDeliveryGeneration: {
-        agentId: "main",
-        storePath: "/synthetic/agent.sqlite",
+        ...storageOwner,
         sessionKey: input.requesterSessionKey,
-        sessionId: "requester-id",
-        lifecycleRevision: "requester-revision",
+        ...requesterSession,
       },
       requesterOrigin: {
         channel: "telegram",
@@ -286,14 +345,11 @@ describe("followup retained session authorization", () => {
       request,
       {
         cfg: mocks.config(),
+        admissionConfig: mocks.config(),
         callGateway,
-        runId: input.runId,
+        runId,
         sessionKey: input.targetSessionKey,
-        sessionStoreTarget: {
-          agentId: "main",
-          canonicalKey: input.targetSessionKey,
-          storePath: "/synthetic/agent.sqlite",
-        },
+        sessionStoreTarget: storageTarget(input.targetSessionKey),
         sendParams: {
           agentId: "main",
           message: "followup",
@@ -303,20 +359,18 @@ describe("followup retained session authorization", () => {
       },
       replyContext,
     );
-    expect(result.start.ok).toBe(false);
-    if (result.start.ok) {
-      throw new Error("Expected failed ACK");
-    }
-    expect(result.start.result.details).toMatchObject({ sentBeforeError: true });
+    expect(result.start).toMatchObject({
+      ok: false,
+      result: { details: { sentBeforeError: true } },
+    });
     expect(callGateway).toHaveBeenCalledTimes(1);
     expect(startSessionsSendReplyFlow).toHaveBeenCalledTimes(1);
     expect(startSessionsSendReplyFlow).toHaveBeenCalledWith(
       expect.objectContaining({
         ...replyContext,
         completion,
-        runId: input.runId,
+        runId,
         skip: false,
-        requesterSessionKey: input.requesterSessionKey,
         notifyRequesterOnWaitFailure: true,
       }),
     );
@@ -327,12 +381,13 @@ describe("followup retained session authorization", () => {
     "latches %s revocation after the row recovers",
     async (change) => {
       const changedKey = change === "access" ? "legacy-worker-alias" : input.targetSessionKey;
-      const preparedTarget = target().target;
-      if (!preparedTarget) {
-        throw new Error("Expected target facts");
-      }
+      const preparedTarget = target().target!;
       preparedTarget.storeKeys.push(changedKey);
       const request = await prepare();
+      const assertRevoked = () =>
+        expect(() => request.custody.assertCurrent()).toThrow(
+          change === "access" ? "revoked" : "archived",
+        );
       expect(() => request.custody.assertCurrent()).not.toThrow();
       if (change === "access") {
         target().membership = new Set();
@@ -341,18 +396,14 @@ describe("followup retained session authorization", () => {
       }
       sessionChanges.emit({ sessionKey: changedKey });
       expect(request.custody.signal.aborted).toBe(true);
-      expect(() => request.custody.assertCurrent()).toThrow(
-        change === "access" ? "revoked" : "archived",
-      );
+      assertRevoked();
       if (change === "access") {
         target().membership = new Set(["requester"]);
       } else {
         delete preparedTarget.entry.archivedAt;
       }
       sessionChanges.emit({ sessionKey: changedKey });
-      expect(() => request.custody.assertCurrent()).toThrow(
-        change === "access" ? "revoked" : "archived",
-      );
+      assertRevoked();
     },
   );
   it("refuses missing captured authority rather than selecting a System caller", async () => {

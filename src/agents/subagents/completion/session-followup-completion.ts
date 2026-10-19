@@ -32,7 +32,8 @@ const state = resolveGlobalSingleton(Symbol.for("openclaw.sessions.followupCompl
 /** Project accepted public result obligations from their existing execution owner. */
 export function listSessionFollowupCompletions(params: {
   requesterSessionKey: string;
-  requesterAgentId: string;
+  requesterAgentId?: string;
+  requesterStorePath?: string;
   requesterTurnRunId?: string;
 }): FollowupCompletionOwner[] {
   return [...new Set(state.executions.values())].filter(
@@ -41,7 +42,10 @@ export function listSessionFollowupCompletions(params: {
       !owner.signal.aborted &&
       owner.request.visibleReply === true &&
       owner.request.requesterSessionKey === params.requesterSessionKey &&
-      owner.request.requesterAgentId === params.requesterAgentId &&
+      (params.requesterAgentId === undefined ||
+        owner.request.requesterAgentId === params.requesterAgentId) &&
+      (params.requesterStorePath === undefined ||
+        owner.request.requesterStorePath === params.requesterStorePath) &&
       (params.requesterTurnRunId === undefined ||
         owner.request.requesterTurnRunId === params.requesterTurnRunId),
   );

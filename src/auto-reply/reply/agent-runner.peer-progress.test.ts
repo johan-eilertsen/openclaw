@@ -33,6 +33,7 @@ describe("runReplyAgent peer progress", () => {
             requesterAgentId: params.agentId,
             requesterSessionKey: params.sessionKey,
             requesterSessionId: params.sessionId,
+            requesterStorePath: "/synthetic/requester/sessions.json",
             targetAgentId: "peer",
             targetSessionKey: "agent:peer:main",
             custody: {

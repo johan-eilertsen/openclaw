@@ -16,6 +16,7 @@ export type FollowupRequest = {
   runId: string;
   requesterSessionKey: string;
   requesterSessionId: string;
+  requesterStorePath: string;
   requesterTurnRunId?: string;
   visibleReply?: boolean;
   requesterAgentId: string;
