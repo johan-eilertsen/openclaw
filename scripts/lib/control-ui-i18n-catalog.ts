@@ -11,6 +11,7 @@ import { registerBoardWebsiteEnglish } from "../../ui/src/i18n/locales/en-board-
 import { registerBrowserEnglish } from "../../ui/src/i18n/locales/en-browser.ts";
 import { registerChatCameraEnglish } from "../../ui/src/i18n/locales/en-chat-camera.ts";
 import { registerChatCiEnglish } from "../../ui/src/i18n/locales/en-chat-ci.ts";
+import { registerChatCommandResultsEnglish } from "../../ui/src/i18n/locales/en-chat-command-results.ts";
 import { registerChatGoalsEnglish } from "../../ui/src/i18n/locales/en-chat-goals.ts";
 import { registerChatMessageMetadataEnglish } from "../../ui/src/i18n/locales/en-chat-message-metadata.ts";
 import { registerChatProviderReviewEnglish } from "../../ui/src/i18n/locales/en-chat-provider-review.ts";
@@ -77,6 +78,7 @@ const sourceFiles = [
   "en-browser.ts",
   "en-chat-camera.ts",
   "en-chat-ci.ts",
+  "en-chat-command-results.ts",
   "en-chat-goals.ts",
   "en-chat-message-metadata.ts",
   "en-chat-provider-review.ts",
@@ -138,13 +140,12 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     }
   }
   const sessionsView: TranslationMap = {};
-  for (const [key, value] of Object.entries(en.sessionsView)) {
+  for (const [key, value] of Object.entries(
+    registerSessionOrganizationEnglish.catalog.sessionsView,
+  )) {
     sessionsView[key] = value;
     if (key === "searchPlaceholder") {
       Object.assign(sessionsView, registerCommandPaletteEnglish.catalog.sessionsView);
-    }
-    if (key === "archiveSession") {
-      Object.assign(sessionsView, registerSessionOrganizationEnglish.catalog.sessionsView);
     }
     if (key === "assignToMe") {
       Object.assign(sessionsView, registerSessionPeopleEnglish.catalog.sessionsView);
@@ -164,7 +165,11 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     // Preserve partial-fragment key order while keeping shared labels eager.
     {
       ...en,
-      custodian: { ...registerPluginManagementEnglish.catalog.custodian, ...en.custodian },
+      custodian: {
+        ...registerPluginManagementEnglish.catalog.custodian,
+        ...en.custodian,
+        autoSetup: registerPluginManagementEnglish.catalog.custodian.autoSetup,
+      },
       chat: {
         ...en.chat,
         commands: registerCommandPaletteEnglish.catalog.chat.commands,
@@ -201,6 +206,7 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     registerBrowserEnglish.catalog,
     registerChatCameraEnglish.catalog,
     registerChatCiEnglish.catalog,
+    registerChatCommandResultsEnglish.catalog,
     registerChatGoalsEnglish.catalog,
     registerChatProviderReviewEnglish.catalog,
     registerCodeBlocksEnglish.catalog,

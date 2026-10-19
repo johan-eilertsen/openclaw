@@ -692,7 +692,10 @@ export async function validateUpdateCandidateCanary(params: {
       failed.failureFacts.some(
         (fact) => failureLine === `${displayPhase}: ${fact.message} (${durationMs}ms)`,
       );
-    failed.stderrTail ??= stepLogTail.slice(0, repeatsFact ? -1 : undefined).join("\n");
+    failed.stderrTail ??=
+      phase === "snapshot"
+        ? message
+        : stepLogTail.slice(0, repeatsFact ? -1 : undefined).join("\n");
     try {
       await reportReceipt(onStep, failed);
     } catch (recordingError) {
