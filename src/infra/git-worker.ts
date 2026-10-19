@@ -140,6 +140,8 @@ function poolFor(
     // Overlay retains three maximum-size manifests plus its decoded result.
     workerOptions:
       owner === "workspace" ? { resourceLimits: { maxOldGenerationSizeMb: 1024 } } : undefined,
+    // Discovery refreshes and PR polls can leave readers idle for just over a minute.
+    idleTimeoutMs: owner === "reads" ? 120_000 : undefined,
     sharedCompute: owner === "workspace",
   }));
 }
@@ -250,6 +252,12 @@ async function executeOperation(
     contentRoot !== undefined
       ? startGitOperationTiming("content-read", log, () => ({
           operation: command.type,
+          ...(command.type === "checkout.diff"
+            ? {
+                scope: command.input.scope ?? "all",
+                summaryOnly: command.input.summaryOnly === true,
+              }
+            : {}),
           checkoutId: createHash("sha256")
             .update(path.resolve(contentRoot))
             .digest("hex")

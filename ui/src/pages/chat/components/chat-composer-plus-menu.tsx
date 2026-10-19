@@ -1,8 +1,5 @@
-import { createMemo, createUniqueId, Show } from "solid-js";
-import type { ToolsEffectiveEntry, ToolsEffectiveResult } from "../../../api/types.ts";
+import { createEffect, createMemo, createUniqueId, onSettled, Show } from "solid-js";
 import { pathForRoute } from "../../../app-route-paths.ts";
-import type { ApplicationNavigationOptions } from "../../../app/context.ts";
-import { icons } from "../../../components/icons.ts";
 import { Icon } from "../../../components/solid/icon.tsx";
 import {
   Menu,
@@ -11,10 +8,8 @@ import {
   type MenuItem,
 } from "../../../components/solid/menu.tsx";
 import { registerMcpEnglish } from "../../../i18n/locales/en-mcp.ts";
-import type { McpServerSummary } from "../../../lib/config/mcp-servers.ts";
 import { formatUiExternalText } from "../../../lib/format-error.ts";
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
-import type { SessionToolOverrides } from "../../../lib/sessions/patch.ts";
 import {
   countSessionToolOverrides,
   nextBooleanToolOverrides,
@@ -25,93 +20,31 @@ import {
   resolveWebSearchToolOverrideState,
 } from "../../../lib/sessions/tool-overrides.ts";
 import { uploadsEnabled } from "../../../lib/uploads.ts";
-import type { ComposerLibraryProps } from "../composer-library-session.ts";
-import type { ChatAttachmentControlsProps } from "./chat-attachment-controls.types.ts";
-import { handleChatAttachmentMenuSelection } from "./chat-attachment-inputs.ts";
 import { useSingleAttachmentPicker } from "./chat-attachment-picker-policy.ts";
-import { solidTemplate } from "./chat-composer-controls.ts";
-import { LitContent } from "./chat-composer-interop.tsx";
+import { ComposerContent } from "./chat-composer-content.tsx";
 import {
   handleComposerLibrarySelection,
   composerLibraryMenuItems,
 } from "./chat-composer-library-menu.tsx";
+import {
+  menuRenderInputs,
+  toolsForServer,
+  isToolDenied,
+  MCP_DISCOVERY_NOTICE_IDS,
+} from "./chat-composer-menu-inputs.ts";
 import {
   renderBackRow,
   renderCapabilityMenuState,
   renderCapabilityToggleRow,
   menuDivider,
 } from "./chat-composer-menu-rows.tsx";
-import { closeOtherChatComposerPickers } from "./chat-picker-overlay.ts";
+import type {
+  ChatComposerPlusMenuContentProps,
+  ChatComposerPlusMenuProps,
+  ChatComposerPlusMenuView,
+} from "./chat-composer-plus-menu.types.ts";
 
 registerEnglishCatalog(registerMcpEnglish);
-
-export type ChatComposerPlusMenuView =
-  | "root"
-  | "skills"
-  | "connectors"
-  | `tools:${string}`
-  | `library:${string}`;
-
-export type ChatComposerMenuSkill = {
-  key: string;
-  name: string;
-  enabled: boolean;
-  baseEnabled: boolean;
-  missingDeps?: boolean;
-  blocked?: boolean;
-};
-
-type ChatComposerRootToggle = {
-  value: string;
-  label: string;
-  icon?: unknown;
-  checked: boolean;
-  disabled: boolean;
-  title?: string;
-  onChange: (checked: boolean) => void;
-};
-
-type ChatComposerPlusMenuProps = {
-  attachments: ChatAttachmentControlsProps;
-  capabilityMenu?: ChatComposerCapabilityMenuProps;
-  disabled: boolean;
-  open: boolean;
-  view: ChatComposerPlusMenuView;
-  toolOverrides: SessionToolOverrides | null | undefined;
-  rootToggles?: readonly ChatComposerRootToggle[];
-  onOpenChange: (open: boolean) => void;
-  onViewChange: (view: ChatComposerPlusMenuView) => void;
-};
-
-export type ChatComposerCapabilityMenuProps = {
-  basePath: string;
-  skills: readonly ChatComposerMenuSkill[] | null;
-  skillsLoading: boolean;
-  skillsError: boolean;
-  library?: ComposerLibraryProps;
-  libraryDialog?: unknown;
-  mcpServers: readonly McpServerSummary[];
-  toolsEffectiveResult: ToolsEffectiveResult | null;
-  toolsEffectiveLoading: boolean;
-  toolsEffectiveError: boolean;
-  toolAccessMutationBlockedReason: string | null;
-  webSearchBaseEnabled: boolean;
-  mutationBlockedReason: string | null;
-  canAdmin: boolean;
-  adminBlockedReason: string | null;
-  addServerDialog?: unknown;
-  onLoadSkills: () => void;
-  onPatchToolOverrides: (next: SessionToolOverrides | null) => void;
-  onNavigate: (
-    routeId: "mcp" | "plugins" | "skills",
-    options?: ApplicationNavigationOptions,
-  ) => void;
-  onAddServer?: () => void;
-  onOpenToolAccess?: (serverName: string) => void;
-};
-
-type ChatComposerPlusMenuContentProps = ChatComposerPlusMenuProps &
-  ChatComposerCapabilityMenuProps & { showCapabilities: boolean };
 
 function rootItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
   const entries: MenuEntry[] = [];
@@ -193,7 +126,7 @@ function rootItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
           : !menu.webSearchBaseEnabled
             ? t("chat.composer.menu.webSearchGloballyDisabled")
             : ""),
-      icon: icons.globe,
+      icon: "globe",
       checkbox: true,
     }),
     menuDivider("manage-divider"),
@@ -325,25 +258,6 @@ function connectorItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
   return entries;
 }
 
-type McpToolEntry = ToolsEffectiveEntry & { mcpServer: string; mcpToolName: string };
-const toolsForServer = (result: ToolsEffectiveResult | null, serverName: string): McpToolEntry[] =>
-  (result?.groups ?? [])
-    .flatMap((group) => group.tools)
-    .filter(
-      (tool): tool is McpToolEntry =>
-        tool.source === "mcp" && tool.mcpServer === serverName && Boolean(tool.mcpToolName),
-    );
-const MCP_DISCOVERY_NOTICE_IDS = new Set([
-  "mcp-not-yet-connected",
-  "mcp-not-yet-listed",
-  "mcp-stale-catalog",
-]);
-const isToolDenied = (props: ChatComposerPlusMenuContentProps, tool: McpToolEntry): boolean =>
-  props.toolOverrides != null
-    ? (readOwnEntry(props.toolOverrides.mcpToolsDeny, tool.mcpServer)?.includes(tool.mcpToolName) ??
-      false)
-    : tool.deniedBySession === true;
-
 function toolItems(menu: ChatComposerPlusMenuContentProps, serverName: string): MenuEntry[] {
   const tools = toolsForServer(menu.toolsEffectiveResult, serverName);
   const notice = !tools.length
@@ -416,16 +330,19 @@ function toolItems(menu: ChatComposerPlusMenuContentProps, serverName: string): 
 }
 
 function handleMenuSelection(
-  item: MenuItem,
+  { id: value }: MenuItem,
   event: CustomEvent<MenuItem>,
-  surface: HTMLElement,
-  props: ChatComposerPlusMenuContentProps,
+  menu: MenuHandle,
+  ownerProps: { menu: ChatComposerPlusMenuContentProps },
 ) {
-  const value = item.id;
+  const props = ownerProps.menu;
+  const overlay = menu.overlay;
+  const { surface } = overlay;
   if (
     uploadsEnabled(props.attachments.uploadConfig) &&
-    handleChatAttachmentMenuSelection({ currentTarget: surface, detail: { item: { value } } })
+    (value === "camera" || value === "photo" || value === "file")
   ) {
+    props.inputHandle.open(value);
     return;
   }
   const rootToggle = props.rootToggles?.find((toggle) => toggle.value === value);
@@ -437,10 +354,19 @@ function handleMenuSelection(
     return;
   }
   const changeView = (view: ChatComposerPlusMenuView) => {
+    const focused = surface.ownerDocument.activeElement;
     props.onViewChange(view);
-    requestAnimationFrame(() =>
-      surface.querySelector<HTMLElement>('[role^="menuitem"]:not([disabled])')?.focus(),
-    );
+    onSettled(() => {
+      const active = surface.ownerDocument.activeElement;
+      // A controlled close can settle before Menu applies it; newer focus also wins.
+      if (
+        overlay.open &&
+        ownerProps.menu.open &&
+        (active === focused || (active === surface.ownerDocument.body && !focused?.isConnected))
+      ) {
+        menu.focusFirst();
+      }
+    });
   };
   const toggleCapability = (
     group: "skills" | "mcpServers",
@@ -557,22 +483,42 @@ function handleMenuSelection(
 }
 
 function PlusMenuSurface(props: { menu: ChatComposerPlusMenuContentProps }) {
-  let handle: MenuHandle | undefined;
+  let handle!: MenuHandle;
   let host!: HTMLDivElement;
   const id = createUniqueId();
-  const view = () => (props.menu.showCapabilities ? props.menu.view : "root");
-  const items = createMemo(() => {
-    const current = view();
-    return current === "skills"
-      ? skillItems(props.menu)
-      : current === "connectors"
-        ? connectorItems(props.menu)
-        : current.startsWith("tools:")
-          ? toolItems(props.menu, current.slice("tools:".length))
-          : current.startsWith("library:")
-            ? composerLibraryMenuItems(props.menu.library, current.slice("library:".length))
-            : rootItems(props.menu);
-  });
+  let releaseAnchor = () => {};
+  onSettled(() => () => releaseAnchor());
+  const view = createMemo(() => (props.menu.showCapabilities ? props.menu.view : "root"));
+  const inputs = createMemo(
+    () => {
+      const current = view();
+      const menu = props.menu;
+      return { view: current, menu, values: menuRenderInputs(menu, current) };
+    },
+    {
+      lazy: true,
+      equals: (previous, next) =>
+        previous.view === next.view &&
+        previous.values.length === next.values.length &&
+        previous.values.every((value, index) => Object.is(value, next.values[index])),
+    },
+  );
+  const items = createMemo(
+    () => {
+      // Only a changed presentation snapshot recreates owned nodes; actions read live props.
+      const { view: current, menu } = inputs();
+      return current === "skills"
+        ? skillItems(menu)
+        : current === "connectors"
+          ? connectorItems(menu)
+          : current.startsWith("tools:")
+            ? toolItems(menu, current.slice("tools:".length))
+            : current.startsWith("library:")
+              ? composerLibraryMenuItems(menu.library, current.slice("library:".length))
+              : rootItems(menu);
+    },
+    { lazy: true },
+  );
   return (
     <>
       <div
@@ -583,6 +529,7 @@ function PlusMenuSurface(props: { menu: ChatComposerPlusMenuContentProps }) {
         data-view={view()}
       >
         <Menu
+          lazy
           id={`chat-composer-plus-${id}`}
           panelClass="agent-chat__capability-menu-panel"
           placement="top-start"
@@ -596,13 +543,10 @@ function PlusMenuSurface(props: { menu: ChatComposerPlusMenuContentProps }) {
           items={items()}
           ref={(next) => {
             handle = next;
+            releaseAnchor();
+            releaseAnchor = props.menu.inputHandle.bindAnchor(next.overlay.trigger);
           }}
-          onSelect={(item, event) => {
-            if (handle) {
-              handleMenuSelection(item, event, handle.overlay.surface, props.menu);
-            }
-          }}
-          onBeforeShow={() => closeOtherChatComposerPickers(host)}
+          onSelect={(item, event) => handleMenuSelection(item, event, handle, props)}
           onNavigate={({ value }) =>
             props.menu.onNavigate(value === "manage-skills" ? "skills" : "plugins")
           }
@@ -617,52 +561,57 @@ function PlusMenuSurface(props: { menu: ChatComposerPlusMenuContentProps }) {
           }}
         />
       </div>
-      <LitContent value={props.menu.addServerDialog} />
-      <LitContent value={props.menu.libraryDialog} />
+      <ComposerContent>{props.menu.addServerDialog}</ComposerContent>
+      <ComposerContent>{props.menu.libraryDialog}</ComposerContent>
     </>
   );
 }
 
-function resolvePlusMenuProps(props: ChatComposerPlusMenuProps) {
-  const capabilityMenu = props.capabilityMenu;
-  if (
-    !capabilityMenu &&
-    !props.rootToggles?.length &&
-    !uploadsEnabled(props.attachments.uploadConfig)
-  ) {
-    return null;
-  }
-  return {
-    ...props,
-    ...capabilityMenu,
-    showCapabilities: capabilityMenu !== undefined,
-    basePath: capabilityMenu?.basePath ?? "",
-    skills: capabilityMenu?.skills ?? null,
-    skillsLoading: capabilityMenu?.skillsLoading ?? false,
-    skillsError: capabilityMenu?.skillsError ?? false,
-    mcpServers: capabilityMenu?.mcpServers ?? [],
-    toolsEffectiveResult: capabilityMenu?.toolsEffectiveResult ?? null,
-    toolsEffectiveLoading: capabilityMenu?.toolsEffectiveLoading ?? false,
-    toolsEffectiveError: capabilityMenu?.toolsEffectiveError ?? false,
-    toolAccessMutationBlockedReason: capabilityMenu?.toolAccessMutationBlockedReason ?? null,
-    webSearchBaseEnabled: capabilityMenu?.webSearchBaseEnabled ?? true,
-    mutationBlockedReason: capabilityMenu?.mutationBlockedReason ?? null,
-    canAdmin: capabilityMenu?.canAdmin ?? false,
-    adminBlockedReason: capabilityMenu?.adminBlockedReason ?? null,
-    onLoadSkills: capabilityMenu?.onLoadSkills ?? (() => {}),
-    onPatchToolOverrides: capabilityMenu?.onPatchToolOverrides ?? (() => {}),
-    onNavigate: capabilityMenu?.onNavigate ?? (() => {}),
-  };
-}
-
 export function ChatComposerPlusMenu(props: { menu: ChatComposerPlusMenuProps }) {
-  return (
-    <Show when={resolvePlusMenuProps(props.menu)}>
-      {(menu) => <PlusMenuSurface menu={menu()} />}
-    </Show>
+  // Reconnects can replace the capability owner while this menu stays open.
+  createEffect(
+    () => ({
+      open: props.menu.open,
+      view: props.menu.view,
+      load: props.menu.capabilityMenu?.onLoadView,
+    }),
+    ({ open, view, load }) => {
+      if (open) {
+        load?.(view);
+      }
+    },
   );
-}
-
-export function renderChatComposerPlusMenu(menu: ChatComposerPlusMenuProps) {
-  return solidTemplate(ChatComposerPlusMenu, { menu });
+  const resolved = createMemo(() => {
+    const current = props.menu;
+    const capabilityMenu = current.capabilityMenu;
+    if (
+      !capabilityMenu &&
+      !current.rootToggles?.length &&
+      !uploadsEnabled(current.attachments.uploadConfig)
+    ) {
+      return null;
+    }
+    return {
+      ...current,
+      ...capabilityMenu,
+      showCapabilities: capabilityMenu !== undefined,
+      basePath: capabilityMenu?.basePath ?? "",
+      skills: capabilityMenu?.skills ?? null,
+      skillsLoading: capabilityMenu?.skillsLoading ?? false,
+      skillsError: capabilityMenu?.skillsError ?? false,
+      mcpServers: capabilityMenu?.mcpServers ?? [],
+      toolsEffectiveResult: capabilityMenu?.toolsEffectiveResult ?? null,
+      toolsEffectiveLoading: capabilityMenu?.toolsEffectiveLoading ?? false,
+      toolsEffectiveError: capabilityMenu?.toolsEffectiveError ?? false,
+      toolAccessMutationBlockedReason: capabilityMenu?.toolAccessMutationBlockedReason ?? null,
+      webSearchBaseEnabled: capabilityMenu?.webSearchBaseEnabled ?? true,
+      mutationBlockedReason: capabilityMenu?.mutationBlockedReason ?? null,
+      canAdmin: capabilityMenu?.canAdmin ?? false,
+      adminBlockedReason: capabilityMenu?.adminBlockedReason ?? null,
+      onLoadSkills: capabilityMenu?.onLoadSkills ?? (() => {}),
+      onPatchToolOverrides: capabilityMenu?.onPatchToolOverrides ?? (() => {}),
+      onNavigate: capabilityMenu?.onNavigate ?? (() => {}),
+    };
+  });
+  return <Show when={resolved()}>{(menu) => <PlusMenuSurface menu={menu()} />}</Show>;
 }

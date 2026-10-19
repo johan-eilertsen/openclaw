@@ -7,7 +7,6 @@ import { resolvePersistedSessionStoreOwnerForKey } from "../../config/sessions/s
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createAbortError } from "../../infra/abort-signal.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
-import { registerActiveEmbeddedRunRuntimeWait } from "../embedded-agent-runner/run-state.js";
 import { resolveSubagentCompletionResultText } from "../subagents/completion/subagent-completion-result.js";
 import { subscribeSubagentRunChanges } from "../subagents/registry/subagent-registry-publication.js";
 import { prepareSubagentRunsByRunIds } from "../subagents/registry/subagent-registry.js";
@@ -17,7 +16,10 @@ import { resolveSwarmConfig } from "../subagents/swarm/swarm-config.js";
 import { describeAgentsWaitTool } from "../tool-description-presets.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, ToolInputError } from "./common.js";
-import { getGatewayToolCallerIdentity } from "./gateway-caller-context.js";
+import {
+  captureGatewayToolCallerAssertion,
+  getGatewayToolCallerIdentity,
+} from "./gateway-caller-context.js";
 
 const MAX_WAIT_IDS = 1_000;
 
@@ -214,13 +216,14 @@ async function waitForCollector(
     abortError: () => Error;
   },
 ) {
-  const authority = getGatewayToolCallerIdentity()?.approvalAuthority;
+  const watchdogAttempt = getGatewayToolCallerIdentity()?.watchdogAttempt;
+  const assertCurrent = captureGatewayToolCallerAssertion();
   const deadline =
     params.timeoutMs === undefined ? undefined : performance.now() + params.timeoutMs;
   let changed: boolean;
   let resume: (() => void) | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let releaseRuntimeWait: (() => void) | undefined;
+  let watchdogWait: ReturnType<NonNullable<typeof watchdogAttempt>["beginWait"]> | undefined;
   const wake = () => {
     changed = true;
     resume?.();
@@ -276,27 +279,31 @@ async function waitForCollector(
       }
       await new Promise<void>((resolve) => {
         resume = resolve;
-        // Only a successfully read, owned pending collector can park this run.
-        // Publications revoke the wait until its owner has been reread; a hung
-        // registry read remains ordinary recoverable host work.
-        releaseRuntimeWait = authority
-          ? registerActiveEmbeddedRunRuntimeWait(
-              authority,
-              () => resume !== undefined && !changed && !params.signal?.aborted,
-            )
-          : undefined;
+        // Only a verified, owned pending collector parks the current attempt.
+        // Publications revoke protection before the reread, so a hung read
+        // remains recoverable. The controller still enforces execution deadlines.
+        watchdogWait = watchdogAttempt?.beginWait({
+          kind: "runtime_owned",
+          isCurrent: () => {
+            if (resume === undefined || changed || params.signal?.aborted) {
+              return false;
+            }
+            assertCurrent?.();
+            return true;
+          },
+        });
         if (deadline !== undefined) {
           timer = setTimeout(resolve, Math.max(0, deadline - performance.now()));
         }
       });
-      releaseRuntimeWait?.();
-      releaseRuntimeWait = undefined;
+      watchdogWait?.close();
+      watchdogWait = undefined;
       clearTimeout(timer);
       timer = undefined;
       resume = undefined;
     }
   } finally {
-    releaseRuntimeWait?.();
+    watchdogWait?.close();
     clearTimeout(timer);
     unsubscribe();
     params.signal?.removeEventListener("abort", wake);
