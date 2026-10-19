@@ -108,10 +108,9 @@ it("projects only accepted source obligations and follows the requester executio
     throw new Error("projection failed");
   });
   const c = await yieldCohort();
-  const successor = owner.successor([c], "second", () => {});
-  await owner.prepareSuccessor(successor);
-  owner.adopt(successor);
-  owner.markAccepted("second");
+  const next = successor(c);
+  await owner.prepareSuccessor(next);
+  adopt(next);
   await owner.withRequesterRun("requester-resumed", async () => {
     expect(owner.progress).toEqual({ phase: "processing", runId: "requester-resumed" });
   });
