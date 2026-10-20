@@ -46,10 +46,12 @@ internal inputs: recovery does not inherit a sender's channel delivery rights,
 and a follow-up without an authenticated operator source cannot reconstruct
 authority from its transcript.
 
-An accepted child continuation keeps the restored operator's current identity and
-permission checks independently of the parent's recovery claim. Completing the
-parent does not cancel that child. Revoking the operator, replacing the source
-session, or stopping the Gateway still invalidates the child's authority.
+An accepted child continuation, including a child created with `sessions_spawn`,
+keeps the restored operator's current identity and permission checks independently
+of the parent's recovery claim. Completing the parent does not cancel that child.
+Explicitly stopping the parent still cancels its children. Revoking the operator,
+replacing the source session, or stopping the Gateway still invalidates the child's
+authority.
 
 This includes automation turns running in dashboard main sessions. If a restart
 exhausts its drain budget, cancellation preserves restart recovery even when the
@@ -479,7 +481,17 @@ the hard upper bound. Clean database restart proof is published only after write
 leases, checkpointing, and native connection closure settle; one database's idle
 receipt alone does not authorize process exit.
 
-Worker-placement maintenance stops admitting new candidates when drain begins.
+Session-admission diagnostics distinguish source cleanup from effect admission.
+Pending source cleanup includes live counts of sources, operations, and retained
+source work. A failed final response does not retain a source after its runtime
+confirms completed disposal, even when disposal also reports a callback error.
+Unfinished disposal still retains its cleanup obligation.
+
+Worker-placement and environment reconciliation stop admitting new candidates
+when suspension or drain begins. Releasing a suspension allows the next scheduled
+sweep to resume. Drain signals cancellation to in-flight provider inspections.
+Device pairing and presence reads stop waiting; their late results cannot resume
+reconciliation afterward.
 Optional session-evidence reads and disk probes are canceled. Node retention stops
 new preparation and cancels supported requests; an in-progress shared bundle
 build remains joined. An accepted retirement, workspace recovery, reclaim, or
@@ -500,7 +512,7 @@ Pending diagnostics distinguish attachment reconciliation, environment reconcili
 retention writes, candidate reads, and session recovery. For an attached worker, shutdown stops the exact
 remote environment before draining its workspace queue: a foreground command
 can hold that queue until the stop cancels it. Remote stop, drain, and active-turn
-cancellation acknowledgments share at most five seconds after shutdown begins,
+cancellation acknowledgments and native computer close requests share at most five seconds after shutdown begins,
 capped by the remaining process cleanup budget, including cancellation already
 started before shutdown. Tunnel cleanup separately times initialization, active
 launches, workspace operations, and transfers, so a slow reconciliation join names
@@ -858,6 +870,10 @@ New input follows the live reply owner's queue policy. Without a live reply, dur
 fences must have terminal evidence before admission can retire them. Successful
 final delivery clears its pending intent and any unclaimed recovery route while
 preserving newer execution or delivery claims.
+Message-tool text and managed media already committed to WebChat history do not
+by themselves create another pending final delivery during turn completion.
+Other payload content and later additions, such as Connect buttons, generated
+speech, or usage footers, retain their delivery custody.
 
 Before readiness, startup invokes the shared Doctor transform to normalize older
 persisted `running` or `queued` values to `interrupted` once, except verified legacy
@@ -1254,8 +1270,9 @@ continuing them; recovery does not rewrite ambiguous history.
 A completed child may still owe its requester a final follow-up. If that
 follow-up is waiting for admission or is interrupted by restart, the saved
 obligation survives and resumes after startup. Restart admission rejection and
-transient preparation failures leave that obligation owed. The requester mailbox
-orders the input under fresh admission; a waiting input has no separate
+transient preparation failures leave that obligation owed. A new completion wave
+waits for interrupted requester work to recover before reserving its mailbox input.
+The requester mailbox orders the input under fresh admission; a waiting input has no separate
 announcement expiry. An observed terminal delivery outcome settles once. If its
 bookkeeping fails, the registry retains that receipt and retries persistence
 without resending the result. The outbound durable delivery queue keeps its own
@@ -1275,6 +1292,9 @@ the gateway, or an explicit restart request), a restart sentinel is written to
 SQLite before the process exits. After boot the gateway posts the outcome back
 to the originating chat and dispatches any requested one-shot continuation turn
 so the agent picks up exactly where it left off, on the same channel and thread.
+If interrupted work defers that continuation before execution, it stays in the
+durable delivery queue and retries through fresh session admission. A deferred
+attempt does not consume the continuation or reuse its retired mailbox input.
 
 For updates, the sentinel carries `stats.runId`, linking the detached updater to
 its durable `update_runs` record. The new Gateway records its observed running

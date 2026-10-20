@@ -81,9 +81,17 @@ beforeAll(async () => {
     capture.mockRestore();
   }
 });
-afterAll(async () => {
-  await server.close();
-});
+afterAll(() => server.close());
+
+function completeRun(runId: string, text: string) {
+  const { terminalReply } = prepareAgentRunTerminalReply({ rawText: text });
+  emitAgentEvent({
+    runId,
+    stream: "lifecycle",
+    data: { phase: "end", startedAt: 1, endedAt: Date.now(), terminalReply },
+  });
+  return { payloads: [{ text, mediaUrl: null }], meta: { durationMs: 1, terminalReply } };
+}
 
 it.for([
   { flow: "child", outcome: "success" },
@@ -104,6 +112,11 @@ it.for([
     const child = visiblePeer ? "agent:peer:main" : "agent:main:subagent:owner-proof";
     const parentId = "owner-proof-parent";
     const originalRun = "owner-proof-original";
+    const parentIdentity = { sessionKey: parent, sessionId: parentId, agentId: "main" };
+    const toolOptions = { agentSessionKey: parent, sessionId: parentId };
+    const wait = <T>(work: PromiseLike<T>) => withinTest(work, signal);
+    const gate = (entered: PromiseLike<unknown>, work: PromiseLike<unknown>, message: string) =>
+      wait(awaitGateBeforeSettlement(entered, work, message));
     const effectPath = path.join(root, "effect.txt");
     testState.sessionStorePath = path.join(root, "sessions.json");
     testState.agentsConfig = { entries: { main: {}, peer: {} } };
@@ -125,15 +138,11 @@ it.for([
     };
     setRuntimeConfigSnapshot(config);
     publishSystemEventStoreConfig(config);
+    const sender = { senderId: "owner-proof", channel: "discord" };
     const owner = {
-      senderId: "owner-proof",
-      channel: "discord",
+      ...sender,
       accountId: "default",
-      isCurrent: () =>
-        isConfiguredCommandOwner(getRuntimeConfig(), {
-          channel: "discord",
-          senderId: "owner-proof",
-        }),
+      isCurrent: () => isConfiguredCommandOwner(getRuntimeConfig(), sender),
     };
     expect(owner.isCurrent()).toBe(true);
     const childMayFinish = createDeferred();
@@ -260,101 +269,71 @@ it.for([
         sessionId: opts.sessionKey === child ? "owner-proof-child" : parentId,
       });
       await opts.userTurnTranscriptRecorder?.persistApproved();
-      let text = "child result";
       if (opts.sessionKey === child) {
         await childMayFinish.promise;
         if (outcome === "child error") {
           throw new Error("synthetic child failure");
         }
-      } else {
-        const admission = prepareAgentCommandExecutionIdentity({
-          opts,
-          prepared: {
-            cfg: getRuntimeConfig(),
-            runId,
-            sessionAgentId: "main",
-            sessionId: parentId,
-            sessionKey: parent,
-          },
-          ingress: { kind: "gateway-client", boundary: "agent", state: "present" },
-          lifecycleGeneration: expectDefined(opts.lifecycleGeneration, "Gateway generation"),
-        });
-        try {
-          expect(originalClosed).toBe(true);
-          expect(opts.inputProvenance).toMatchObject({
-            kind: "inter_session",
-            sourceTool: visiblePeer ? "sessions_send" : "subagent_announce",
-            sourceSessionKey: child,
-          });
-          if (visiblePeer) {
-            expect(opts).toMatchObject({
-              deliver: true,
-              channel: "discord",
-              to: "channel:owner-proof",
-            });
-          }
-          const admitted = await admission.admit("embedded");
-          const caller = createAdmittedGatewayToolCallerIdentity({
-            admittedRunContext: admitted,
-            agentId: "main",
-            sessionKey: parent,
-          });
-          await withGatewayToolCallerIdentity(caller, () =>
-            withPluginRuntimeRegistryScope(builder.registry, async () => {
-              const tool = expectDefined(
-                resolveOpenClawPluginToolsForOptions({
-                  options: {
-                    runId,
-                    agentSessionKey: parent,
-                    sessionId: parentId,
-                    workspaceDir: root,
-                    senderIsOwner: false,
-                    pluginToolAllowlist: ["owner_proof"],
-                  },
-                }).find((entry) => entry.name === "owner_proof"),
-                "registered plugin tool",
-              );
-              try {
-                await tool.execute("owner-effect", {});
-              } catch (error) {
-                pluginError = error;
-              }
-            }),
-          );
-        } catch (error) {
-          parentError = error;
-        } finally {
-          await admission.finish();
-          parentFinished.resolve();
-        }
-        text = "parent complete";
+        return completeRun(runId, "child result");
       }
-      const { terminalReply } = prepareAgentRunTerminalReply({ rawText: text });
-      emitAgentEvent({
-        runId,
-        stream: "lifecycle",
-        data: {
-          phase: "end",
-          startedAt: 1,
-          endedAt: Date.now(),
-          terminalReply,
-        },
+      const admission = prepareAgentCommandExecutionIdentity({
+        opts,
+        prepared: { ...parentIdentity, cfg: getRuntimeConfig(), runId, sessionAgentId: "main" },
+        ingress: { kind: "gateway-client", boundary: "agent", state: "present" },
+        lifecycleGeneration: expectDefined(opts.lifecycleGeneration, "Gateway generation"),
       });
-      return {
-        payloads: [{ text, mediaUrl: null }],
-        meta: {
-          durationMs: 1,
-          terminalReply,
-        },
-      };
+      try {
+        expect(originalClosed).toBe(true);
+        expect(opts.inputProvenance).toMatchObject({
+          kind: "inter_session",
+          sourceTool: visiblePeer ? "sessions_send" : "subagent_announce",
+          sourceSessionKey: child,
+        });
+        if (visiblePeer) {
+          expect(opts).toMatchObject({
+            deliver: true,
+            channel: "discord",
+            to: "channel:owner-proof",
+          });
+        }
+        const admitted = await admission.admit("embedded");
+        const caller = createAdmittedGatewayToolCallerIdentity({
+          admittedRunContext: admitted,
+          agentId: "main",
+          sessionKey: parent,
+        });
+        await withGatewayToolCallerIdentity(caller, () =>
+          withPluginRuntimeRegistryScope(builder.registry, async () => {
+            const tool = expectDefined(
+              resolveOpenClawPluginToolsForOptions({
+                options: {
+                  runId,
+                  ...toolOptions,
+                  workspaceDir: root,
+                  senderIsOwner: false,
+                  pluginToolAllowlist: ["owner_proof"],
+                },
+              }).find((entry) => entry.name === "owner_proof"),
+              "registered plugin tool",
+            );
+            try {
+              await tool.execute("owner-effect", {});
+            } catch (error) {
+              pluginError = error;
+            }
+          }),
+        );
+      } catch (error) {
+        parentError = error;
+      } finally {
+        await admission.finish();
+        parentFinished.resolve();
+      }
+      return completeRun(runId, "parent complete");
     });
     const { operationalRunInstance } = createTestAdmittedRunContext(originalRun);
     const authority = claimAgentRunDelegatedAuthority(operationalRunInstance);
-    registerAgentRunContext(originalRun, {
-      agentId: "main",
-      sessionKey: parent,
-      sessionId: parentId,
-    });
+    registerAgentRunContext(originalRun, parentIdentity);
     try {
       try {
         const capability = expectDefined(
@@ -383,8 +362,7 @@ it.for([
               const send = expectDefined(
                 createOpenClawTools({
                   runId: originalRun,
-                  agentSessionKey: parent,
-                  sessionId: parentId,
+                  ...toolOptions,
                   config,
                   ...(visiblePeer
                     ? {
@@ -405,16 +383,9 @@ it.for([
               expect(result.details).toMatchObject({ status: "accepted" });
             }),
         );
-        await withinTest(
-          awaitGateBeforeSettlement(
-            inlineWaitStarted.promise,
-            sent,
-            "Send ended before entering its inline completion wait",
-          ),
-          signal,
-        );
+        await gate(inlineWaitStarted.promise, sent, "Send ended before inline completion wait");
         await vi.advanceTimersByTimeAsync(1_000);
-        await withinTest(sent, signal);
+        await wait(sent);
       } finally {
         releaseAgentRunDelegatedAuthority(authority);
         clearAgentRunContext(originalRun);
@@ -424,26 +395,20 @@ it.for([
         }
         childMayFinish.resolve();
       }
-      await withinTest(
-        awaitGateBeforeSettlement(
-          requesterAccepted.promise,
-          completionClosed.promise,
-          "Completion ended before requester admission",
-        ),
-        signal,
+      await gate(
+        requesterAccepted.promise,
+        completionClosed.promise,
+        "Completion ended before requester admission",
       );
       // Cross the native accepted-ack yield without advancing run deadlines.
       await vi.advanceTimersByTimeAsync(10);
       if (outcome === "new user while waiting") {
-        await withinTest(parentFinished.promise, signal);
+        await wait(parentFinished.promise);
       } else {
-        await withinTest(
-          awaitGateBeforeSettlement(
-            pluginEntered.promise,
-            parentFinished.promise,
-            "Requester ended before its plugin could check owner authority",
-          ),
-          signal,
+        await gate(
+          pluginEntered.promise,
+          parentFinished.promise,
+          "Requester ended before plugin invocation",
         );
         expect(pluginError).toBeUndefined();
       }
@@ -457,8 +422,8 @@ it.for([
         revokeRequesterCronAuthority(parent);
       }
       effectMayFinish.resolve();
-      await withinTest(parentFinished.promise, signal);
-      await withinTest(completionClosed.promise, signal);
+      await wait(parentFinished.promise);
+      await wait(completionClosed.promise);
       expect(parentError).toBeUndefined();
       expect(requesterReceipt).toMatchObject({ status: "ok" });
       if (visiblePeer) {
