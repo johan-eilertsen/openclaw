@@ -1,5 +1,5 @@
 import { expectDefined } from "@openclaw/normalization-core";
-import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { beforeEach, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { resetDiagnosticEventsForTest } from "../../infra/diagnostic-events.js";
 import { recoverStuckDiagnosticSession } from "../../logging/diagnostic-stuck-session-recovery.runtime.js";
@@ -14,8 +14,12 @@ import { applyCodeModeCatalog } from "../code-mode.js";
 import { createCodeModeHarness, resetCodeModeTestState } from "../code-mode.test-support.js";
 import type { PreparedSubagentRunsRead } from "../subagents/registry/subagent-registry-read-snapshot.js";
 import type { SubagentRunRecord } from "../subagents/registry/subagent-registry.types.js";
-import { createAgentsWaitTool } from "./agents-wait-tool.js";
-import { collectorRun } from "./agents-wait-tool.test-support.js";
+import {
+  collectorRun,
+  createMainSessionWaitTool,
+  preparedRuns,
+  selectRuns,
+} from "./agents-wait-tool.test-support.js";
 import {
   createAdmittedGatewayToolCallerIdentity,
   withGatewayToolCallerIdentity,
@@ -45,26 +49,99 @@ vi.mock("../subagents/registry/subagent-registry-publication.js", async (importO
     }) satisfies typeof actual.subscribeSubagentRunChanges,
   };
 });
-function selectRuns(ids: readonly string[]) {
-  return new Map(
-    ids.flatMap((id) => {
-      const entry = records.get(id);
-      return entry ? [[id, entry] as const] : [];
-    }),
-  );
-}
-function preparedRuns(
-  read: () => ReadonlyMap<string, SubagentRunRecord>,
-): PreparedSubagentRunsRead {
-  return { consume: (consume) => ({ ready: true, value: consume(read()) }) };
-}
-function createMainSessionWaitTool() {
-  return createAgentsWaitTool({
-    agentSessionKey: "agent:main:main",
-    agentId: "main",
-    config: { tools: { swarm: true } },
+function observeRead() {
+  const read = createDeferred();
+  registryEvents.read.mockImplementation(async (ids) => {
+    read.resolve();
+    return preparedRuns(() => selectRuns(records, ids));
   });
+  return read.promise;
 }
+function publishCompletion(entry: SubagentRunRecord) {
+  entry.collectorCompletion = { status: "failed" };
+  for (const listener of registryEvents.listeners) {
+    listener();
+  }
+}
+beforeEach(() => {
+  records.clear();
+  registryEvents.listeners.clear();
+  registryEvents.read
+    .mockReset()
+    .mockImplementation(async (ids) => preparedRuns(() => selectRuns(records, ids)));
+});
+it.each(["cell", "nested"])(
+  "keeps sibling results owned with %s awaitResults until every completion arrives",
+  async (mode) => {
+    onTestFinished(resetCodeModeTestState);
+    const first = collectorRun("first-required", "agent:main:main", { status: "done" });
+    const second = collectorRun("second-required", "agent:main:main");
+    records.set(first.runId, first);
+    records.set(second.runId, second);
+    const read = observeRead();
+    const h = createCodeModeHarness();
+    applyCodeModeCatalog({ ...h.ctx, tools: [...h.tools, createMainSessionWaitTool()] });
+    const result = expectDefined(h.tools[0], "exec").execute("required-child-results", {
+      title: "Collect required child results",
+      awaitResults: mode === "cell",
+      code: `return await agents_wait({ids:["first-required", "second-required"]${mode === "nested" ? ", awaitResults: true" : ""}});`,
+    });
+    try {
+      await read;
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      await vi.advanceTimersByTimeAsync(60_000);
+      const pending = Symbol("pending");
+      expect(await Promise.race([result, Promise.resolve(pending)])).toBe(pending);
+      expect(registryEvents.read).toHaveBeenCalledOnce();
+      second.completion = { required: false, resultText: "child failure evidence" };
+      publishCompletion(second);
+      vi.useRealTimers();
+      expect((await result).details).toMatchObject({
+        status: "completed",
+        value: {
+          pending: [],
+          completed: [
+            { runId: first.runId, status: "done" },
+            { runId: second.runId, status: "failed", result: "child failure evidence" },
+          ],
+        },
+      });
+      expect(registryEvents.read).toHaveBeenCalledTimes(2);
+      expect(registryEvents.listeners.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      publishCompletion(second);
+      await result;
+    }
+  },
+);
+
+it("cancels required collection without borrowing another requester's child", async () => {
+  const entry = collectorRun("foreign-required", "agent:other:main");
+  records.set(entry.runId, entry);
+  const tool = createMainSessionWaitTool();
+  await expect(
+    tool.execute("foreign", { ids: [entry.runId], awaitResults: true }),
+  ).resolves.toMatchObject({
+    details: { success: false, errors: [{ runId: entry.runId, error: "not_owner" }] },
+  });
+  entry.swarmRequesterSessionKey = "agent:main:main";
+  const read = observeRead();
+  const abort = new AbortController();
+  const result = tool.execute(
+    "required-abort",
+    { ids: [entry.runId], awaitResults: true },
+    abort.signal,
+  );
+  const rejected = expect(result).rejects.toThrow("agents_wait aborted");
+  await read;
+  abort.abort();
+  await rejected;
+  expect(registryEvents.listeners.size).toBe(0);
+  await expect(
+    tool.execute("ambiguous-wait", { ids: [entry.runId], awaitResults: true, timeoutSeconds: 1 }),
+  ).rejects.toThrow("cannot also specify");
+});
 
 function publishChanges() {
   for (const listener of registryEvents.listeners) {
@@ -105,7 +182,7 @@ async function startParentWait(codeMode = false) {
   registryEvents.read.mockImplementation(async (ids) =>
     preparedRuns(() => {
       read.resolve();
-      return selectRuns(ids);
+      return selectRuns(records, ids);
     }),
   );
   const tool = createMainSessionWaitTool();
@@ -155,188 +232,86 @@ async function startParentWait(codeMode = false) {
   };
 }
 
-describe("required collector completion", () => {
-  beforeEach(() => {
-    records.clear();
-    registryEvents.listeners.clear();
-    registryEvents.read
-      .mockReset()
-      .mockImplementation(async (ids) => preparedRuns(() => selectRuns(ids)));
-  });
-  it.each([
-    { outcome: "done", codeMode: true },
-    { outcome: "failed", codeMode: false },
-    { outcome: "stopped", codeMode: false },
-  ] as const)(
-    "keeps a long collector wait alive until $outcome (Code Mode: $codeMode)",
-    async ({ outcome, codeMode }) => {
-      const parent = await startParentWait(codeMode);
-      await parent.read;
-      parent.advancePastQuietToolDeadline();
-      await expect(
-        recoverStuckDiagnosticSession({
-          operation: parent.operation,
-          sessionId: parent.operation.sessionId,
-          sessionKey: parent.operation.key,
-          ageMs: 16 * 60_000,
-          queueDepth: 0,
-          allowActiveAbort: true,
-        }),
-      ).resolves.toMatchObject({ status: "skipped", reason: "active_reply_work" });
-      expect(parent.abort).not.toHaveBeenCalled();
-      expect(registryEvents.read).toHaveBeenCalledOnce();
+it.each([
+  { outcome: "done", codeMode: true },
+  { outcome: "failed", codeMode: false },
+  { outcome: "stopped", codeMode: false },
+] as const)(
+  "keeps a long collector wait alive until $outcome (Code Mode: $codeMode)",
+  async ({ outcome, codeMode }) => {
+    const parent = await startParentWait(codeMode);
+    await parent.read;
+    parent.advancePastQuietToolDeadline();
+    await expect(
+      recoverStuckDiagnosticSession({
+        operation: parent.operation,
+        sessionId: parent.operation.sessionId,
+        sessionKey: parent.operation.key,
+        ageMs: 16 * 60_000,
+        queueDepth: 0,
+        allowActiveAbort: true,
+      }),
+    ).resolves.toMatchObject({ status: "skipped", reason: "active_reply_work" });
+    expect(parent.abort).not.toHaveBeenCalled();
+    expect(registryEvents.read).toHaveBeenCalledOnce();
 
-      if (outcome === "stopped") {
-        const stopped = stopSession({
-          capture: captureSessionControllerStop({ operations: [parent.operation] }),
-          source: "client-run",
-        });
-        expect(stopped.aborted).toBe(true);
-        await expect(parent.result).rejects.toThrow("agents_wait aborted");
-        expect(parent.abort).toHaveBeenCalledOnce();
-      } else {
-        parent.entry.collectorCompletion = { status: outcome };
-        parent.entry.completion = { required: false, resultText: "collected result" };
-        publishChanges();
-        const completed = {
-          completed: [{ runId: parent.entry.runId, status: outcome, result: "collected result" }],
-          pending: [],
-        };
-        await expect(parent.result).resolves.toMatchObject({
-          details: codeMode ? { status: "completed", value: completed } : completed,
-        });
-      }
-      expect(parent.operation.watchdog.snapshot().waits).toEqual([]);
-      expect(registryEvents.listeners.size).toBe(0);
-    },
-  );
-
-  it.each(["execution deadline", "revoked authority", "stalled reread"] as const)(
-    "does not protect a collector after %s",
-    async (cause) => {
-      const parent = await startParentWait();
-      await parent.read;
-      parent.advancePastQuietToolDeadline();
-      expect(await parent.operation.watchdog.tick()).toEqual({
-        action: "observe",
-        reason: "runtime_owned",
+    if (outcome === "stopped") {
+      const stopped = stopSession({
+        capture: captureSessionControllerStop({ operations: [parent.operation] }),
+        source: "client-run",
       });
-      const reread = createDeferred<PreparedSubagentRunsRead>();
-      try {
-        if (cause === "execution deadline") {
-          parent.attempt.setExecutionDeadline(Date.now());
-        } else if (cause === "revoked authority") {
-          parent.admission.close();
-        } else {
-          registryEvents.read.mockImplementation(() => reread.promise);
-          publishChanges();
-        }
-        expect(parent.operation.watchdog.decide()).toMatchObject({
-          action: "stop",
-          reason: cause === "execution deadline" ? "execution_deadline" : "semantic_stall",
-        });
-        await parent.operation.watchdog.tick();
-        expect(parent.abort).toHaveBeenCalledOnce();
-        expect(parent.operation.result).toMatchObject({ kind: "failed", code: "run_stalled" });
-      } finally {
-        reread.resolve(preparedRuns(() => selectRuns([parent.entry.runId])));
-      }
+      expect(stopped.aborted).toBe(true);
       await expect(parent.result).rejects.toThrow("agents_wait aborted");
-      expect(parent.operation.watchdog.snapshot().waits).toEqual([]);
-      expect(registryEvents.listeners.size).toBe(0);
-    },
-  );
-  it.each(["cell", "nested"])(
-    "keeps sibling results owned with %s awaitResults until every completion arrives",
-    async (mode) => {
-      onTestFinished(resetCodeModeTestState);
-      const first = collectorRun("first-required", "agent:main:main", { status: "done" });
-      const second = collectorRun("second-required", "agent:main:main");
-      records.set(first.runId, first);
-      records.set(second.runId, second);
-      const read = createDeferred();
-      registryEvents.read.mockImplementation(async (ids) => {
-        read.resolve();
-        return preparedRuns(() => selectRuns(ids));
+      expect(parent.abort).toHaveBeenCalledOnce();
+    } else {
+      parent.entry.collectorCompletion = { status: outcome };
+      parent.entry.completion = { required: false, resultText: "collected result" };
+      publishChanges();
+      const completed = {
+        completed: [{ runId: parent.entry.runId, status: outcome, result: "collected result" }],
+        pending: [],
+      };
+      await expect(parent.result).resolves.toMatchObject({
+        details: codeMode ? { status: "completed", value: completed } : completed,
       });
-      const h = createCodeModeHarness();
-      applyCodeModeCatalog({ ...h.ctx, tools: [...h.tools, createMainSessionWaitTool()] });
-      let settled = false;
-      const result = expectDefined(h.tools[0], "exec")
-        .execute("required-child-results", {
-          title: "Collect required child results",
-          awaitResults: mode === "cell",
-          code: `return await agents_wait({ids:["first-required", "second-required"]${mode === "nested" ? ", awaitResults: true" : ""}});`,
-        })
-        .then((value) => {
-          settled = true;
-          return value;
-        });
-      try {
-        await read.promise;
-        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(settled).toBe(false);
-        expect(registryEvents.read).toHaveBeenCalledOnce();
-        second.completion = { required: false, resultText: "child failure evidence" };
-        second.collectorCompletion = { status: "failed" };
-        for (const listener of registryEvents.listeners) {
-          listener();
-        }
-        vi.useRealTimers();
-        await expect(result).resolves.toMatchObject({
-          details: {
-            status: "completed",
-            value: {
-              pending: [],
-              completed: [
-                { runId: first.runId, status: "done" },
-                { runId: second.runId, status: "failed", result: "child failure evidence" },
-              ],
-            },
-          },
-        });
-        expect(registryEvents.read).toHaveBeenCalledTimes(2);
-        expect(registryEvents.listeners.size).toBe(0);
-      } finally {
-        vi.useRealTimers();
-        second.collectorCompletion = { status: "failed" };
-        for (const listener of registryEvents.listeners) {
-          listener();
-        }
-        await result;
-      }
-    },
-  );
-
-  it("cancels required collection without borrowing another requester's child", async () => {
-    const entry = collectorRun("foreign-required", "agent:other:main");
-    records.set(entry.runId, entry);
-    const tool = createMainSessionWaitTool();
-    await expect(
-      tool.execute("foreign", { ids: [entry.runId], awaitResults: true }),
-    ).resolves.toMatchObject({
-      details: { success: false, errors: [{ runId: entry.runId, error: "not_owner" }] },
-    });
-    entry.swarmRequesterSessionKey = "agent:main:main";
-    const read = createDeferred();
-    registryEvents.read.mockImplementation(async (ids) => {
-      read.resolve();
-      return preparedRuns(() => selectRuns(ids));
-    });
-    const abort = new AbortController();
-    const result = tool.execute(
-      "required-abort",
-      { ids: [entry.runId], awaitResults: true },
-      abort.signal,
-    );
-    const rejected = expect(result).rejects.toThrow("agents_wait aborted");
-    await read.promise;
-    abort.abort();
-    await rejected;
+    }
+    expect(parent.operation.watchdog.snapshot().waits).toEqual([]);
     expect(registryEvents.listeners.size).toBe(0);
-    await expect(
-      tool.execute("ambiguous-wait", { ids: [entry.runId], awaitResults: true, timeoutSeconds: 1 }),
-    ).rejects.toThrow("cannot also specify");
-  });
-});
+  },
+);
+
+it.each(["execution deadline", "revoked authority", "stalled reread"] as const)(
+  "does not protect a collector after %s",
+  async (cause) => {
+    const parent = await startParentWait();
+    await parent.read;
+    parent.advancePastQuietToolDeadline();
+    expect(await parent.operation.watchdog.tick()).toEqual({
+      action: "observe",
+      reason: "runtime_owned",
+    });
+    const reread = createDeferred<PreparedSubagentRunsRead>();
+    try {
+      if (cause === "execution deadline") {
+        parent.attempt.setExecutionDeadline(Date.now());
+      } else if (cause === "revoked authority") {
+        parent.admission.close();
+      } else {
+        registryEvents.read.mockImplementation(() => reread.promise);
+        publishChanges();
+      }
+      expect(parent.operation.watchdog.decide()).toMatchObject({
+        action: "stop",
+        reason: cause === "execution deadline" ? "execution_deadline" : "semantic_stall",
+      });
+      await parent.operation.watchdog.tick();
+      expect(parent.abort).toHaveBeenCalledOnce();
+      expect(parent.operation.result).toMatchObject({ kind: "failed", code: "run_stalled" });
+    } finally {
+      reread.resolve(preparedRuns(() => selectRuns(records, [parent.entry.runId])));
+    }
+    await expect(parent.result).rejects.toThrow("agents_wait aborted");
+    expect(parent.operation.watchdog.snapshot().waits).toEqual([]);
+    expect(registryEvents.listeners.size).toBe(0);
+  },
+);

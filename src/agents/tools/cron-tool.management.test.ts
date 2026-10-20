@@ -12,10 +12,12 @@ import {
   runWithCronCreatorAuthorityCapability,
 } from "../cron-creator-authority-context.js";
 import { createCronTool } from "./cron-tool.js";
+import type { CronToolOptions } from "./cron-tool.types.js";
 import {
   getGatewayToolCallerIdentity,
   withGatewayToolCallerIdentity,
 } from "./gateway-caller-context.js";
+import * as gatewayModule from "./gateway.js";
 
 const jobId = "existing-job";
 const configRevision = "sha256:stored-job";
@@ -27,6 +29,11 @@ async function withAdminTool(
   origin: "unknown" | "channel-owner",
   payload: Record<string, unknown> | undefined,
   run: (tool: ReturnType<typeof createCronTool>, calls: Array<[string, unknown]>) => Promise<void>,
+  storedJob?: Record<string, unknown>,
+  creatorOptions: Pick<
+    CronToolOptions,
+    "config" | "creatorToolAllowlist" | "creatorToolAllowlistCaptureRef"
+  > = {},
 ) {
   const runId = "admin-management-tool-run";
   const sessionKey = "agent:main:control-ui";
@@ -57,14 +64,22 @@ async function withAdminTool(
     return withCronManagementGrant(caller!.cronManagementGrant!, identity, method, async () => {
       getCronManagementAuthority(identity)!();
       calls.push([method, params]);
-      return (method === "cron.get" ? { id: jobId, configRevision, payload } : { id: jobId }) as T;
+      return (
+        method === "cron.get" ? { id: jobId, configRevision, payload, ...storedJob } : { id: jobId }
+      ) as T;
     });
   }
   try {
     await runWithCronCreatorAuthorityCapability(capability, () =>
       withGatewayToolCallerIdentity({ ...identity, approvalAuthority: authority }, async () => {
-        const options = { runId, agentSessionKey: sessionKey, resolveCreatorToolAuthority };
-        const tool = createCronTool(options, { callGatewayTool });
+        const options = {
+          ...creatorOptions,
+          runId,
+          agentSessionKey: sessionKey,
+          resolveCreatorToolAuthority,
+        };
+        using _ = vi.spyOn(gatewayModule, "callGatewayTool").mockImplementation(callGatewayTool);
+        const tool = createCronTool(options);
         await run(tool, calls);
         expect(resolveCreatorToolAuthority).not.toHaveBeenCalled();
       }),
@@ -96,6 +111,92 @@ it.each([
   });
 });
 
+it("permits explicit on-exit edits through admitted management", async () => {
+  await withAdminTool("unknown", undefined, async (tool, calls) => {
+    const patch = { schedule: { kind: "on-exit", command: "make", cwd: "/repo" } };
+    await tool.execute("on-exit-update", { action: "update", jobId, job: patch });
+    expect(calls).toEqual([["cron.update", { id: jobId, patch }]]);
+  });
+});
+
+it("does not expose stream creation through a management grant", async () => {
+  await withAdminTool("unknown", undefined, async (tool, calls) => {
+    await expect(
+      tool.execute("stream-add", {
+        action: "add",
+        job: {
+          name: "watch events",
+          schedule: { kind: "stream", command: ["node", "events.mjs"] },
+          payload: { kind: "agentTurn", message: "handle events" },
+        },
+      }),
+    ).rejects.toThrow("can only list, get, update, run, or remove automations");
+    expect(calls).toEqual([]);
+  });
+});
+
+it.each([
+  {
+    label: "complete exec authority",
+    tools: [{ name: "exec", execOrigin: "openclaw" }],
+    capture: { value: { version: 1, source: "final-executable-surface" } },
+    error: undefined,
+  },
+  {
+    label: "no exec authority",
+    tools: ["read"],
+    capture: { value: { version: 1, source: "final-executable-surface" } },
+    error: "Gateway exec authority",
+  },
+  {
+    label: "incomplete executable surface",
+    tools: [{ name: "exec", execOrigin: "openclaw" }],
+    capture: {},
+    error: "did not capture the complete model-callable tool surface",
+  },
+] satisfies {
+  label: string;
+  tools: CronToolOptions["creatorToolAllowlist"];
+  capture: CronToolOptions["creatorToolAllowlistCaptureRef"];
+  error: string | undefined;
+}[])(
+  "checks the manager's own stream exec authority: $label",
+  async ({ tools, capture, error }) => {
+    const config = { tools: { exec: { host: "gateway", mode: "full" } } } as const;
+    setRuntimeConfigSnapshot(config);
+    await withAdminTool(
+      "unknown",
+      undefined,
+      async (tool, calls) => {
+        const activation = tool.execute("stream-enable", {
+          action: "update",
+          jobId,
+          job: { enabled: true },
+        });
+        if (error) {
+          await expect(activation).rejects.toThrow(error);
+          expect(calls).toEqual([["cron.get", { id: jobId }]]);
+        } else {
+          await expect(activation).resolves.toMatchObject({ details: { id: jobId } });
+          expect(calls).toEqual([
+            ["cron.get", { id: jobId }],
+            [
+              "cron.update",
+              { id: jobId, patch: { enabled: true }, expectedConfigRevision: configRevision },
+            ],
+          ]);
+        }
+      },
+      {
+        enabled: false,
+        schedule: { kind: "stream", command: ["node", "events.mjs"] },
+        state: {},
+      },
+      { config, creatorToolAllowlist: tools, creatorToolAllowlistCaptureRef: capture },
+    );
+  },
+);
+
 it("visibly refuses unsupported next_check", async () => {
   await withAdminTool("unknown", undefined, async (tool, calls) => {
     await expect(tool.execute("unsupported", { action: "next_check", in: "1m" })).rejects.toThrow(
@@ -118,7 +219,7 @@ describe("cron next_check action", () => {
 
   function nextCheck(scopedJobId: string | null = JOB_ID, delay = "15m") {
     const opts = scopedJobId ? { selfRemoveOnlyJobId: scopedJobId, runId: RUN_ID } : undefined;
-    const tool = createCronTool(opts, { callGatewayTool: vi.fn() });
+    const tool = createCronTool(opts);
     return tool.execute("call-next-check", { action: "next_check", in: delay });
   }
 
