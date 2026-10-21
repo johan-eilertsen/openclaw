@@ -46,7 +46,8 @@ internal inputs: recovery does not inherit a sender's channel delivery rights,
 and a follow-up without an authenticated operator source cannot reconstruct
 authority from its transcript.
 
-An accepted child continuation, including a child created with `sessions_spawn`,
+An accepted child continuation, including a child created with `sessions_spawn`
+or an interrupted child resumed with `sessions_send`,
 keeps the restored operator's current identity and permission checks independently
 of the parent's recovery claim. Completing the parent does not cancel that child.
 Explicitly stopping the parent still cancels its children. Revoking the operator,
@@ -102,10 +103,28 @@ grant the recovery caller access to unrelated personal account actions.
 If an input exhausts the existing bounded attempts on a transient failure, later
 inputs in that session remain interrupted too, preserving their replay order.
 This also applies when the earlier input is an inter-session update.
-Other sessions continue recovery. No additional retry loop is started.
+Up to four sessions replay concurrently; each session retains acceptance order,
+including across retries. No additional retry loop is started. Replay and its
+backoff run outside the subagent recovery span, so registry activation does not
+wait for saved-input delivery. Gateway shutdown still joins that delivery work.
+The existing chat-send startup gate and main-session recovery sweep wait until
+replay and registry recovery settle. This prevents new input from overtaking
+saved input and the sweep from racing saved-input predecessor admission; HTTP
+readiness does not wait for replay.
 Before replaying queued inter-session updates, the Gateway resumes any interrupted
 main turn through its existing recovery owner, preserving the predecessor's order.
 The updates remain queued when that owner defers recovery.
+
+Per-input replay diagnostics record the input kind, outcome, wait reason, attempt
+count, and elapsed milliseconds without message content or session/input IDs.
+`sourceLoadMs` measures the saved-input read, `sessionLoadMs` the current session
+reads, `authorityRestoreMs` operator restoration, and `communicationAdmissionMs`
+the peer communication check. `dispatchAckMs` ends at the dispatch acknowledgment;
+it includes preparation before that acknowledgment, not provider execution or
+model completion afterward. `retryWaitMs` separates retry backoff from active
+work. Timings accumulate across attempts and are inclusive: session checks during
+operator restoration also appear in `authorityRestoreMs`, so phase timings must
+not be added together. `totalMs` is the elapsed time for that input's replay.
 
 Automatic chat-input recovery selects inputs accepted in the past 24 hours;
 the existing bounded recovery attempts may finish after that window. Cancelled
@@ -439,6 +458,14 @@ lease join blocking the teardown needed to complete it. A clean database close
 also avoids a stale-lease integrity scan on the next startup; an interrupted close
 still requires that scan.
 
+On Linux, process supervision reaps exited adopted children while the Gateway is
+still running, so child cleanup does not have to wait for the Gateway itself to exit.
+
+If shutdown remains blocked on `restart.close.session-effects`, its pending-close
+diagnostic reports the remaining effect count and the first retained effect's
+session, run, admission phase, and interruption state. The details advance as
+effects release; a cleared source does not imply its retained effects have finished.
+
 The Codex native-profile recovery warning runs as service-owned background work.
 It does not hold readiness while another agent's database admission finishes.
 Doctor still awaits the same diagnostic, and shutdown joins any diagnostic reads
@@ -490,9 +517,13 @@ Unfinished disposal still retains its cleanup obligation.
 
 Worker-placement and environment reconciliation stop admitting new candidates
 when suspension or drain begins. Releasing a suspension allows the next scheduled
-sweep to resume. Drain signals cancellation to in-flight provider inspections.
-Device pairing and presence reads stop waiting; their late results cannot resume
-reconciliation afterward.
+sweep to resume. Suspension, drain, and service shutdown also cancel in-flight
+environment reconciliation. Provider inspection has a 15-second budget, while
+runtime installation keeps its transfer-sized bootstrap budget. Late inspection results
+cannot resume reconciliation or hold the shutdown guard. Interrupted maintenance
+retains the lease and provisioning identity for a later sweep; it does not request
+worker destruction. Provider mutations already in progress still settle before
+their owners close.
 Optional session-evidence reads and disk probes are canceled. Node retention stops
 new preparation and cancels supported requests; an in-progress shared bundle
 build remains joined. An accepted retirement, workspace recovery, reclaim, or
@@ -1087,6 +1118,23 @@ charge when a post-dispatch result is uncertain to avoid replaying work.
 Foreground work that already owns the session keeps automatic recovery out
 until that work settles.
 
+Explicit dispatch rejections can exhaust the startup passes without exhausting
+the charged-attempt budget. The interrupted session keeps its recovery cycle for
+the next startup. An authorized operator can also call `sessions.recover` with
+`{"key":"<session-key>"}` to continue in the same session immediately. This accepts
+one new input under the operator's current authority; it does not restore the
+failed dispatch's authority or replace the session. Active work and pending final
+delivery retain their existing ownership checks.
+
+If a CLI runtime cannot enforce the required restart-safe tools, recovery keeps
+the cycle as a tombstone before refusing in-place continuation. The operator can
+then use **Resume in new session** without losing the interrupted transcript.
+
+Definitive revocation of the original operator's authority remains terminal for
+that input: recovery records one visible interruption instead of retrying it.
+When no other recovery or delivery custody remains, send a new authenticated
+message to continue; `sessions.recover` does not revive that retired input.
+
 Cancelling a recovery reservation after foreground work finishes clears an empty,
 uncharged recovery record. Recovery reconciliation and foreground admission also
 clear this residue from older sessions, so it cannot block a completed subagent's
@@ -1169,6 +1217,38 @@ receives the same context so it can verify effects before retrying a tool call.
 Pending reply delivery, ambiguous reply-hook outcomes, and explicitly replay-safe
 Code Mode reconstruction retain their narrower recovery restrictions.
 
+When the configured tool policy permits automations, a restricted recovery
+continuation can inspect their recorded state with `list`, `get`, and `runs`
+through the existing tool. Scheduler-wide `status` is unavailable. The continuation
+cannot create, update, remove, run, reschedule, or wake work. Existing caller and
+current-job visibility restrictions still apply. For a known watcher, use
+`get` with its job ID to inspect saved state and `streamStatus`; an empty or
+filtered list does not prove that an interrupted action failed or its source
+stopped. An outcome that cannot be established from recorded state remains
+unknown. Recovery instructions direct the agent to check its current tools and
+recorded approval outcomes before promising or attempting further action. A
+restart alone does not require the user to repeat the request. When further
+action requires a fresh request, the agent should explain that requirement and
+continue other permitted work, rather than promise a retry, replacement, or
+fallback. These instructions guide model behavior; they do not guarantee the
+accuracy of freeform replies. Recovery restrictions do not require a permissions
+change or reopen an earlier approval request.
+
+The existing recovery note also includes retained stream approval outcomes tied
+to the stored session ID and exact interrupted run. Supported Doctor owner/key
+migrations preserve this attribution without reassigning historical approvals.
+If an approval was still pending when the Gateway
+restarted and was canceled without being consumed, the note records that this
+proposal did not save its change. That approval stays closed, but recovery may
+continue other authorized work or request fresh approval under the current
+configuration. Canceling an update proposal does not stop or remove the existing
+watcher. These facts remain in conversation history for
+later questions; they do not establish whether other watchers exist or are
+running. Missing or unavailable approval records leave the outcome unknown.
+The note covers a bounded portion of retained approval history. If more records
+remain, it marks unlisted proposal outcomes as unknown.
+This uses existing approval retention and requires no data migration.
+
 OpenClaw can also reconstruct interrupted read-only [Code Mode](/tools/code-mode)
 work. Code Mode marks these runs as restart-safe and rejects side-effecting
 catalog or namespace tool calls before they execute. If a restart lands on
@@ -1200,7 +1280,9 @@ the current child session before resuming.
 Human follow-ups in retained child sessions take native custody under the actual
 executing run ID and follow-up prompt, including browser chat. The completed
 original run keeps its own outcome. Human ownership and dashboard nesting do not
-turn a child into a main-session replay candidate.
+turn a child into a main-session replay candidate. Because nothing resumes a
+child's interrupted turn, the next human message retires that turn's saved
+recovery claim and starts normally instead of waiting for a resume.
 They are not automatically relaunched.
 The parent receives the interruption outcome and owns finishing the user's task.
 For native children with completion notifications disabled, recovery sends a
