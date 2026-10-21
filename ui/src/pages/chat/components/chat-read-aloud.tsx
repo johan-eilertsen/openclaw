@@ -1,19 +1,27 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
-import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onSettled, Show } from "solid-js";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { formatUiError } from "../../../lib/format-error.ts";
 import { canCallGatewayMethod } from "../../../lib/gateway-methods.ts";
 import { projectGateway } from "../../../lib/reactive/application.ts";
-import { useOptionalApplication } from "../../../lib/reactive/context.ts";
+import { useApplication, useOptionalApplication } from "../../../lib/reactive/context.ts";
 import { projectRuntimeConfig } from "../../../lib/reactive/domain-capabilities.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
 import { GatewaySpeechPlayback, resolveSpeechTextLimit } from "../../../lib/speech-playback.ts";
 
-export function ReadAloud(props: { text: string }) {
+type ReadAloudProps = { text: string; buttonRef?: (element: HTMLButtonElement) => void };
+
+export function ReadAloud(props: ReadAloudProps) {
   const context = useOptionalApplication();
-  if (!context) {
-    return null;
-  }
+  return (
+    <Show when={context}>
+      <ReadAloudControl text={props.text} buttonRef={(element) => props.buttonRef?.(element)} />
+    </Show>
+  );
+}
+
+function ReadAloudControl(props: ReadAloudProps) {
+  const context = useApplication();
   const gateway = projectGateway(context.gateway);
   const config = projectRuntimeConfig(context.runtimeConfig);
   const playback = new GatewaySpeechPlayback();
@@ -29,7 +37,19 @@ export function ReadAloud(props: { text: string }) {
     setPlaying(false);
   };
   const playbackIdentity = createMemo(
-    () => [gateway.read().snapshot.client, gateway.read().snapshot.phase, props.text] as const,
+    () => {
+      const { snapshot, connectionRevision } = gateway.read();
+      return [
+        snapshot.client,
+        snapshot.client?.recoveryScope,
+        snapshot.client?.offlineRecoveryRetired,
+        connectionRevision,
+        props.text,
+        snapshot.phase === "connected" &&
+          snapshot.hello !== null &&
+          !canCallGatewayMethod(snapshot, "tts.speak", "operator.write"),
+      ] as const;
+    },
     { equals: (before, after) => before.every((value, index) => value === after[index]) },
   );
   createEffect(playbackIdentity, () => {
@@ -38,7 +58,7 @@ export function ReadAloud(props: { text: string }) {
     // The config capability coalesces this with the other chat consumers.
     void context.runtimeConfig.ensureLoaded().catch(() => undefined);
   });
-  onCleanup(cancelPlayback);
+  onSettled(() => cancelPlayback);
   const available = () => {
     const snapshot = config.read().state.configSnapshot;
     const runtime = snapshot?.runtimeConfig ?? snapshot?.config;
@@ -57,10 +77,8 @@ export function ReadAloud(props: { text: string }) {
       return;
     }
     const current = ++generation;
-    const isCurrent = () =>
-      current === generation &&
-      context.gateway.snapshot.client === client &&
-      context.gateway.snapshot.phase === "connected";
+    const connectionGeneration = client.connectionGeneration;
+    const isCurrent = () => current === generation && context.gateway.snapshot.client === client;
     setPlaying(true);
     setError("");
     try {
@@ -69,7 +87,7 @@ export function ReadAloud(props: { text: string }) {
         client,
         props.text,
         "tts.speak",
-        isCurrent,
+        () => isCurrent() && available() && client.connectionGeneration === connectionGeneration,
         resolveSpeechTextLimit(snapshot?.runtimeConfig ?? snapshot?.config),
       );
     } catch (cause) {
@@ -84,9 +102,10 @@ export function ReadAloud(props: { text: string }) {
   };
   const label = () => t(playing() ? "chat.messages.stopReading" : "chat.messages.readAloud");
   return (
-    <Show when={available()}>
+    <Show when={playing() || available()}>
       <openclaw-tooltip prop:content={error() || label()}>
         <button
+          ref={(element) => props.buttonRef?.(element)}
           class="chat-read-aloud-btn"
           type="button"
           aria-label={label()}
