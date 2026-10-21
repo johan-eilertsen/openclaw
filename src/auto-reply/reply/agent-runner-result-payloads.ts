@@ -32,13 +32,11 @@ import {
   buildFallbackNotice,
   buildProviderPolicyRetryNotice,
 } from "../fallback-state.js";
-import { stripHeartbeatToken } from "../heartbeat.js";
 import {
   getReplyPayloadMetadata,
   isReplyPayloadStatusNotice,
   isReplyPayloadTerminalContent,
   markReplyPayloadForSourceSuppressionDelivery,
-  retainSilentFinalPayloads,
 } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
 import {
@@ -58,6 +56,11 @@ import {
 import type { AccountedAgentTurn } from "./agent-runner-result-accounting.js";
 import type { FinalizeReplyAgentRunInput } from "./agent-runner-result.types.js";
 import { resolveResponseUsageLine } from "./agent-runner-usage-line.js";
+import {
+  resolveAutomationReplyState,
+  retainAutomationReasoningWithFinal,
+  selectAutomationReplyPayloads,
+} from "./automation-reply-payloads.js";
 import { attachMcpAppChannelAction, attachMcpConnectChannelAction } from "./mcp-channel-actions.js";
 import { normalizeReplyPayload } from "./normalize-reply.js";
 import {
@@ -147,41 +150,26 @@ export async function prepareReplyAgentPayloads(state: {
     (!runResult.meta?.error ||
       (runResult.meta.error.kind === "incomplete_turn" &&
         runResult.meta.error.message.startsWith(MISSING_REPLY_NOTICE_TEXT)));
-  const blocked =
-    runResult.meta?.error?.kind === "hook_block" ||
-    runResult.didSendDeterministicApprovalPrompt === true;
   const replyOperationRunState = resolveReplyOperationRunState(opts);
-  const successfulTerminal =
-    context.execution.status === "ok" &&
-    !blocked &&
-    !runResult.meta?.error &&
-    runResult.meta?.aborted !== true &&
-    !terminalFailurePayload;
-  const authoredSilence =
-    successfulTerminal && runResult.meta?.terminalReply?.disposition === "silent";
+  const { implicitContinuation, peerFollowups, continuationOwner, pendingContinuation } =
+    prepareWaitingStatusContext(context, terminalReplyExpectation);
+  const {
+    blocked,
+    successfulTerminal,
+    authoredSilence,
+    heartbeatAcknowledgment,
+    automationNoChange,
+    reasoningPayloadsEnabled,
+  } = resolveAutomationReplyState(context.execution, {
+    opts,
+    isHeartbeat,
+    hasPendingFollowups: peerFollowups.length > 0,
+  });
   const strandedFinal =
     successfulTerminal &&
     runResult.meta?.terminalReply?.disposition === "empty" &&
     runResult.meta.terminalReply.code === "message-tool-not-called" &&
     followupRun.strandedReplyRetry !== true;
-  const { implicitContinuation, peerFollowups, continuationOwner, pendingContinuation } =
-    prepareWaitingStatusContext(context, terminalReplyExpectation);
-  const heartbeatText = isHeartbeat
-    ? (runResult.meta?.finalAssistantRawText ??
-      runResult.meta?.finalAssistantVisibleText ??
-      payloadArray
-        .filter(isReplyPayloadTerminalContent)
-        .map((payload) => payload.text ?? "")
-        .join("\n"))
-    : undefined;
-  // Heartbeat acknowledgments are a host-owned non-outcome, not missing answers.
-  // Require authored text: stripHeartbeatToken also skips genuinely empty input.
-  const heartbeatAcknowledgment =
-    successfulTerminal &&
-    !pendingContinuation &&
-    Boolean(heartbeatText?.trim()) &&
-    stripHeartbeatToken(heartbeatText, { mode: "heartbeat" }).shouldSkip;
-
   const successfulSourceReplyDelivery = hasSuccessfulSourceReplyDelivery({
     blockReplyPipeline,
     hasDirectlySentBlockReply,
@@ -216,9 +204,11 @@ export async function prepareReplyAgentPayloads(state: {
         ? "silent"
         : sourceReplyDelivery !== "missing"
           ? sourceReplyDelivery
-          : pendingContinuation
-            ? "pending"
-            : "empty",
+          : automationNoChange
+            ? "silent"
+            : pendingContinuation
+              ? "pending"
+              : "empty",
   );
   const explicitSilence = completion.outcome === "silent";
   if (replyOperationRunState) {
@@ -274,6 +264,7 @@ export async function prepareReplyAgentPayloads(state: {
     if (
       !missingReplyNoticeAllowed ||
       authoredSilence ||
+      automationNoChange ||
       !sessionKey ||
       !storePath ||
       followupRun.strandedReplyRetry !== true ||
@@ -316,7 +307,7 @@ export async function prepareReplyAgentPayloads(state: {
   const isGeneratedToolWarning = (payload: ReplyPayload) =>
     getReplyPayloadMetadata(payload)?.toolErrorWarning !== undefined;
   const isPayloadLaneEnabled = (payload: ReplyPayload) =>
-    (payload.isReasoning !== true || opts?.reasoningPayloadsEnabled === true) &&
+    (payload.isReasoning !== true || reasoningPayloadsEnabled) &&
     (payload.isCommentary !== true || opts?.commentaryPayloadsEnabled === true);
   const applyFinalReplyToMode = (payload: ReplyPayload) => {
     const laneEnabled = isPayloadLaneEnabled(payload);
@@ -547,10 +538,14 @@ export async function prepareReplyAgentPayloads(state: {
     }
   }
 
-  const quietFinal = authoredSilence || heartbeatAcknowledgment;
-  const sourcePayloads = quietFinal ? retainSilentFinalPayloads(payloadArray) : payloadArray;
+  const quietFinal = authoredSilence || heartbeatAcknowledgment || automationNoChange;
+  const sourcePayloads = selectAutomationReplyPayloads(
+    payloadArray,
+    automationNoChange,
+    quietFinal,
+  );
   if (
-    ((explicitSilence || heartbeatAcknowledgment) && sourcePayloads.length === 0) ||
+    (quietFinal && sourcePayloads.length === 0) ||
     (!strandedFinal &&
       completion.outcome !== "delivered" &&
       payloadArray.length === 0 &&
@@ -568,6 +563,9 @@ export async function prepareReplyAgentPayloads(state: {
       : sourcePayloads
   ).filter(isPayloadLaneEnabled);
   let replyPayloads = await buildFinalPayloads(payloadCandidates);
+  if (context.execution.automation) {
+    replyPayloads = retainAutomationReasoningWithFinal(replyPayloads);
+  }
   if (sourceReplyDelivery !== "delivered" && completion.outcome === "delivered") {
     await opts?.onObservedReplyDelivery?.();
   }
