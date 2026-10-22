@@ -24,10 +24,8 @@ import {
 } from "../../routing/session-key.js";
 import { isCronRunSessionKey, parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
-import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 import { resolveSessionAgentId } from "../agent-scope.js";
 import { bindRequesterYieldCronAuthority } from "../cron-creator-authority-context.js";
-import { resolveNestedAgentLaneForSession } from "../lanes.js";
 import { isSubagentSessionFromEntry } from "../subagents/spawn/subagent-depth-policy.js";
 import {
   describeSessionsSendTool,
@@ -68,6 +66,7 @@ import {
   withSessionsSendRequesterSource,
 } from "./sessions-send-session-source.js";
 import {
+  buildSessionsSendAgentParams,
   callSessionsSendGateway,
   createConfiguredAgentMainSession,
   isConfiguredAgentMainSessionKey,
@@ -550,17 +549,14 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
                 assertCurrent: communication.assertCurrent,
               });
             }
-            const sendParams = {
+            const sendParams = buildSessionsSendAgentParams({
               message: dispatchMessage,
               agentId: targetAgentId,
               sessionKey: resolvedKey,
               idempotencyKey: runId,
-              deliver: false,
-              sourceReplyDeliveryMode: "message_tool_only" as const,
-              channel: INTERNAL_MESSAGE_CHANNEL,
-              lane: resolveNestedAgentLaneForSession(resolvedKey),
+              nativeChild: targetIsSubagent && !targetAcpMeta,
               inputProvenance,
-            };
+            });
             if (
               mode === "resume" ||
               (mode === undefined &&
@@ -599,10 +595,9 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
               callDurableGateway: communication.callDurableGateway,
               sendParams,
               sourceOrigin: sameSession ? requesterOrigin : undefined,
-              sessionKey: mode || ownChild ? resolvedKey : displayKey,
+              sessionKey: resolvedKey,
               sessionStoreTarget: targetSession,
-              deliveryTimeoutMs: replyTimeoutMs,
-              allowActiveRunQueueDelivery: timeoutSeconds === 0,
+              allowActiveRunQueueDelivery: !sameSession && timeoutSeconds === 0,
               expectedSessionId,
               preparedTargetSessionId: targetSessionEntry?.sessionId,
               assertSendCurrent: communication.assertCurrent,
@@ -657,6 +652,7 @@ export function createSessionsSendTool(opts?: SessionsSendToolOptions): AnyAgent
                 message,
                 ownChild,
                 nativeChild: !targetAcpMeta,
+                claimRequesterTurnCompletion: timeoutSeconds === 0,
                 requesterSessionKey: requesterSession.canonicalKey,
                 requesterAgentId,
                 requesterTurnRunId: opts?.requesterTurnRunId,

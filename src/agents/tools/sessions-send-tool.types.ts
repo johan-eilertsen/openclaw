@@ -3,6 +3,11 @@ import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import type { ReplyExpectation } from "../reply-completion.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
 
+export type AgentStepSession = {
+  sessionId: string;
+  lifecycleRevision?: string;
+};
+
 export type SessionsSendToolOptions = {
   workerPlacement?: boolean;
   agentId?: string;
