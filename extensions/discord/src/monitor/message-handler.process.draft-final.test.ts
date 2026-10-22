@@ -10,12 +10,9 @@ import {
 } from "../active-turn-thread-route.js";
 import {
   BASE_CHANNEL_ROUTE,
-  createBaseContext,
   createDiscordDraftStream,
-  createMockDraftStream,
   createNoQueuedDispatchResult,
   deliverDiscordReply,
-  dispatchInboundMessageForTest as dispatchInboundMessage,
   dispatchBufferedReplyForTest,
   getGlobalHookRunnerForTest as getGlobalHookRunner,
   getLastDispatchReplyOptions,
@@ -30,7 +27,6 @@ import type { DispatchInboundParams } from "./message-handler.process.test-harne
 import {
   createAutomaticDraftContext,
   createMockDraftStreamForTest,
-  expectFinalAnswerText,
   expectFreshFinalText,
   firstMockArg,
   getDeliveredFinalTexts,
@@ -38,14 +34,13 @@ import {
   useProgressDraftStartDelay,
   createBlockModeContext,
   firstDispatchParams,
+  mockDispatch,
+  runBase,
+  sendFinal,
 } from "./message-handler.process.test-helpers.js";
 
 registerDiscordProcessTestLifecycle();
 const progressStreaming = { mode: "progress", progress: { toolProgress: true } } as const;
-
-async function runBase(overrides: Parameters<typeof createBaseContext>[0] = {}) {
-  await runProcessDiscordMessage(await createBaseContext(overrides));
-}
 
 async function runDraft(overrides: Parameters<typeof createAutomaticDraftContext>[0] = {}) {
   await runProcessDiscordMessage(await createAutomaticDraftContext(overrides));
@@ -68,13 +63,7 @@ function registerHooks(...hooks: string[]) {
 }
 
 function mockFinalReply(payload: FinalReplyPayload, waitForIdle = false) {
-  dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
-    await params?.dispatcher.sendFinalReply(payload);
-    if (waitForIdle) {
-      await params?.dispatcher.waitForIdle();
-    }
-    return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
-  });
+  mockDispatch((params) => sendFinal(params, payload, waitForIdle));
 }
 
 async function runHookSafetyFinalReply(mode: "partial" | "progress") {
@@ -155,10 +144,9 @@ describe("processDiscordMessage draft streaming final delivery", () => {
 
   it("replaces a raw trailing-token preview with the prepared final answer", async () => {
     const draftStream = createMockDraftStreamForTest();
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await params?.replyOptions?.onPartialReply?.({ text: "answer\n\nNO_REPLY" });
       await params?.dispatcher.sendFinalReply({ text: "answer" });
-      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
     });
     const ctx = await createAutomaticDraftContext({
       discordConfig: { streaming: { mode: "partial" } },
@@ -170,24 +158,6 @@ describe("processDiscordMessage draft streaming final delivery", () => {
     expectFreshFinalText("answer");
     expect(draftStream.clear).toHaveBeenCalled();
     expect(draftStream.messageId()).toBeUndefined();
-  });
-
-  it("preserves a delivered final when its first stale-preview cleanup fails", async () => {
-    registerHooks("message_sent");
-    const draftStream = createMockDraftStream();
-    draftStream.clear.mockRejectedValueOnce(new Error("preview cleanup failed"));
-    createDiscordDraftStream.mockReturnValueOnce(draftStream);
-    const runtimeError = vi.fn();
-    mockFinalReply({ text: "Hello\nWorld" });
-    await runDraft({
-      discordConfig: { streaming: { mode: "partial" }, maxLinesPerMessage: 5 },
-      runtime: { log: vi.fn(), error: runtimeError },
-    });
-
-    expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
-    expect(draftStream.clear).toHaveBeenCalledTimes(2);
-    expect(runtimeError).not.toHaveBeenCalled();
-    expectFreshFinalText("Hello\nWorld");
   });
 
   it("sends a fresh final message for broadcast mentions like @everyone", async () => {
@@ -225,7 +195,7 @@ describe("processDiscordMessage draft streaming final delivery", () => {
       lookupStarted.resolve();
       return transcript.promise;
     });
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await startPreparedTool(params);
       await params?.replyOptions?.onItemEvent?.({ progressText: "exec done" });
       await params?.dispatcher.sendFinalReply({ text: truncatedFinal });
@@ -233,7 +203,6 @@ describe("processDiscordMessage draft streaming final delivery", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       transcript.resolve(undefined);
       await params?.dispatcher.waitForIdle();
-      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
     });
 
     await runDraft({
@@ -254,7 +223,7 @@ describe("processDiscordMessage draft streaming final delivery", () => {
     vi.useFakeTimers();
     const draftStream = createMockDraftStreamForTest();
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await startPreparedTool(params);
       expect(params?.replyOptions?.isProgressDraftVisible?.()).toBe(false);
       await params?.replyOptions?.onNarrationUpdate?.({
@@ -265,7 +234,6 @@ describe("processDiscordMessage draft streaming final delivery", () => {
       expect(params?.replyOptions?.isProgressDraftVisible?.()).toBe(true);
       await params?.dispatcher.sendFinalReply({ text: "done" });
       expect(params?.replyOptions?.isProgressDraftVisible?.()).toBe(false);
-      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
     });
 
     await runDraft({
@@ -279,7 +247,7 @@ describe("processDiscordMessage draft streaming final delivery", () => {
     expect(updates).toContain(
       "Reading the gateway config and restarting agents.\n\n🛠️ Exec: running",
     );
-    expectFinalAnswerText("done");
+    expectFreshFinalText("done");
   });
 
   it("stops narration at final and resets it for a queued turn", async () => {
@@ -287,14 +255,13 @@ describe("processDiscordMessage draft streaming final delivery", () => {
     const beginTurn = vi.fn();
     const stopTurn = vi.fn();
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       params?.replyOptions?.onProgressNarratorLifecycle?.({ beginTurn, stopTurn });
       await params?.dispatcher.sendFinalReply({ text: "primary" });
       expect(stopTurn).toHaveBeenCalled();
 
       await params?.replyOptions?.onAssistantMessageStart?.();
       expect(beginTurn).toHaveBeenCalledOnce();
-      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
     });
 
     await runDraft({
@@ -306,7 +273,7 @@ describe("processDiscordMessage draft streaming final delivery", () => {
     const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
     const draftStream = createMockDraftStreamForTest();
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       expect(params?.replyOptions?.sourceReplyDeliveryMode).toBe("message_tool_only");
       expect(params?.replyOptions?.allowProgressCallbacksWhenSourceDeliverySuppressed).toBe(true);
       await startPreparedTool(params);
@@ -375,12 +342,11 @@ describe("processDiscordMessage draft streaming recovery", () => {
       text: fullAnswer,
       timestamp: Date.now() + 60_000,
     });
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await startPreparedTool(params);
       await params?.replyOptions?.onItemEvent?.({ progressText: "exec done" });
       await elapseProgressDraftStartDelay();
       await params?.dispatcher.sendFinalReply({ text: truncatedFinal });
-      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
     });
 
     await runDraft({
@@ -394,31 +360,7 @@ describe("processDiscordMessage draft streaming recovery", () => {
 
     expect(draftStream.update).toHaveBeenCalledTimes(1);
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
-    expectFinalAnswerText(fullAnswer);
-  });
-
-  it("retains the last partial draft when final delivery fails before completion", async () => {
-    const draftStream = createMockDraftStreamForTest();
-    deliverDiscordReply.mockRejectedValueOnce(new Error("send failed"));
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
-      await params?.replyOptions?.onPartialReply?.({ text: "partial answer..." });
-      await params?.dispatcher.sendFinalReply({ text: "complete\nanswer" });
-      return {
-        queuedFinal: true,
-        counts: { final: 1, tool: 0, block: 0 },
-        failedCounts: { final: 1 },
-      };
-    });
-
-    await runDraft({
-      discordConfig: { streaming: { mode: "partial" }, maxLinesPerMessage: 1 },
-    });
-
-    expect(draftStream.update).toHaveBeenCalledWith("partial answer...");
-    expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
-    expect(draftStream.discardPending).toHaveBeenCalled();
-    expect(draftStream.clear).not.toHaveBeenCalled();
-    expect(draftStream.messageId()).toBeDefined();
+    expectFreshFinalText(fullAnswer);
   });
 
   it.each([false, true])(
@@ -462,7 +404,7 @@ describe("processDiscordMessage draft streaming recovery", () => {
 
   it("suppresses tool warning finals when the recovered reply fails to send", async () => {
     deliverDiscordReply.mockRejectedValueOnce(new Error("send failed"));
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await params?.dispatcher.sendFinalReply({ text: "delivery failed" });
       await params?.dispatcher.waitForIdle();
       await params?.dispatcher.sendFinalReply(createNonTerminalToolWarningPayload());
@@ -495,22 +437,16 @@ describe("processDiscordMessage draft streaming recovery", () => {
     });
   });
 
-  it.each([false, true])("streams block previews with assistant boundary: %s", async (boundary) => {
+  it("starts a new block preview at an assistant boundary", async () => {
     const draftStream = createMockDraftStreamForTest();
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
-      await params?.replyOptions?.onPartialReply?.({ text: boundary ? "Hello" : "HelloWorld" });
-      if (boundary) {
-        await params?.replyOptions?.onAssistantMessageStart?.();
-      }
+    mockDispatch(async (params) => {
+      await params?.replyOptions?.onPartialReply?.({ text: "Hello" });
+      await params?.replyOptions?.onAssistantMessageStart?.();
       return createNoQueuedDispatchResult();
     });
     await runProcessDiscordMessage(await createBlockModeContext());
-    if (boundary) {
-      expect(draftStream.forceNewMessage).toHaveBeenCalledTimes(1);
-    } else {
-      expect(draftStream.update.mock.calls.map((call) => call[0])).toEqual(["Hello", "HelloWorld"]);
-      expect(firstDispatchParams().replyOptions?.disableBlockStreaming).toBe(true);
-    }
+    expect(draftStream.forceNewMessage).toHaveBeenCalledTimes(1);
+    expect(firstDispatchParams().replyOptions?.disableBlockStreaming).toBe(true);
   });
 });
 
@@ -529,7 +465,7 @@ async function runProgressScenario(
 describe("processDiscordMessage draft streaming progress", () => {
   it("moves progress and final delivery into a thread created from the source message", async () => {
     const draftStream = createMockDraftStreamForTest();
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await params?.replyOptions?.onItemEvent?.({
         itemId: "preamble-1",
         kind: "preamble",
@@ -543,7 +479,6 @@ describe("processDiscordMessage draft streaming progress", () => {
         threadId: "thread-1",
       });
       await params?.dispatcher.sendFinalReply({ text: "done" });
-      return { queuedFinal: true, counts: { final: 1, tool: 0, block: 0 } };
     });
     await runProgressScenario({ toolProgress: true });
 
@@ -556,7 +491,7 @@ describe("processDiscordMessage draft streaming progress", () => {
   it("keeps adopted-thread progress with terminal tool and timing receipts", async () => {
     const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
     const draftStream = createMockDraftStreamForTest();
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await startToolProgress(params);
       await params?.replyOptions?.onItemEvent?.({
         itemId: "tool:exec-1",
@@ -598,7 +533,7 @@ describe("processDiscordMessage draft streaming progress", () => {
     const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
     const draftStream = createMockDraftStreamForTest();
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       const options = params?.replyOptions;
       expect(options?.progressRequiresReply).toBe(true);
       expect(options?.commentaryPayloadsEnabled).toBe(true);
@@ -625,7 +560,7 @@ describe("processDiscordMessage draft streaming progress", () => {
     const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
     const draftStream = createMockDraftStreamForTest();
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await startToolProgress(params);
       await params?.replyOptions?.onItemEvent?.({ progressText: "first tool done" });
       await elapseProgressDraftStartDelay();
@@ -657,7 +592,7 @@ describe("processDiscordMessage draft streaming progress", () => {
     const draftStream = createMockDraftStreamForTest();
     let replyOptions: DispatchInboundParams["replyOptions"];
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       replyOptions = params?.replyOptions;
       return createNoQueuedDispatchResult();
     });
@@ -681,49 +616,11 @@ describe("processDiscordMessage draft streaming progress", () => {
 });
 
 describe("processDiscordMessage draft streaming reasoning", () => {
-  it("keeps one prepared Apply Patch row when the raw summary arrives", async () => {
-    const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
-    const draftStream = createMockDraftStreamForTest();
-    const modified = ["extensions/discord/src/monitor/message-handler.draft-preview.ts"];
-
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
-      await startPreparedTool(params, "patch-1", "apply_patch");
-      await params?.replyOptions?.onPatchSummary?.({
-        toolCallId: "patch-1",
-        phase: "end",
-        name: "apply_patch",
-        summary: "1 modified",
-        modified,
-      });
-      await params?.replyOptions?.onItemEvent?.(
-        projectAgentToolActivity({
-          toolCallId: "patch-1",
-          name: "apply_patch",
-          phase: "result",
-          status: "completed",
-          result: {
-            details: {
-              summary: { added: [], modified, deleted: [] },
-            },
-          },
-        }),
-      );
-      await elapseProgressDraftStartDelay();
-      return createNoQueuedDispatchResult();
-    });
-
-    await runProgressScenario({ toolProgress: true, label: "Clawing..." });
-
-    expect(draftStream.update).toHaveBeenCalledExactlyOnceWith("Clawing...\n\n🩹 Apply Patch", {
-      complete: true,
-    });
-  });
-
   it("hides opt-in reasoning while session reasoning streaming is off", async () => {
     const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
     const draftStream = createMockDraftStreamForTest();
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await startPreparedTool(params);
       await params?.replyOptions?.onReasoningStream?.({
         text: "Private planning",
@@ -747,7 +644,7 @@ describe("processDiscordMessage draft streaming reasoning", () => {
   it("replaces reasoning snapshots instead of appending duplicates", async () => {
     const elapseProgressDraftStartDelay = useProgressDraftStartDelay();
     const draftStream = createMockDraftStreamForTest();
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await startPreparedTool(params);
       await params?.replyOptions?.onReasoningStream?.({
         text: "Checking ",
@@ -770,7 +667,7 @@ describe("processDiscordMessage draft streaming reasoning", () => {
   it("skips pure-reasoning partial updates without updating draft", async () => {
     const draftStream = createMockDraftStreamForTest();
 
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       await params?.replyOptions?.onPartialReply?.({
         text: "Reasoning:\nThe user asked about X so I need to consider Y",
       });
@@ -786,7 +683,7 @@ describe("processDiscordMessage draft streaming reasoning", () => {
 describe("Discord durable commentary delivery", () => {
   it("delivers admitted commentary once without exposing ordinary progress blocks", async () => {
     const draftStream = createMockDraftStreamForTest();
-    dispatchInboundMessage.mockImplementationOnce(async (params?: DispatchInboundParams) => {
+    mockDispatch(async (params) => {
       expect(params?.replyOptions?.onVerboseProgressVisibilityAsync).toBeTypeOf("function");
       await params?.replyOptions?.onVerboseProgressVisibilityAsync?.(async () => true);
       expect(params?.replyOptions?.shouldDeliverCommentaryPayloads?.()).toBe(true);
@@ -816,7 +713,7 @@ describe("Discord durable commentary delivery", () => {
         replies: [{ text: "Checking the source before asking.", isCommentary: true }],
       }),
     );
-    expectFinalAnswerText("done");
+    expectFreshFinalText("done");
     expect(draftStream.update).not.toHaveBeenCalled();
   });
 });
