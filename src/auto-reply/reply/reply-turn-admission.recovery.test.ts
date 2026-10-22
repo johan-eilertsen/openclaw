@@ -11,6 +11,9 @@ import * as recoveryLifecycle from "../../agents/main-session-recovery/main-sess
 import * as recoveryOwnerRelease from "../../agents/main-session-recovery/main-session-recovery-owner-release.js";
 import * as recoveryStore from "../../agents/main-session-recovery/main-session-recovery-store.js";
 import * as restartRecovery from "../../agents/main-session-recovery/main-session-restart-recovery.js";
+import { createSubagentRunRecord } from "../../agents/subagent-test-fixtures.test-helpers.js";
+import { subagentRuns } from "../../agents/subagents/registry/subagent-registry-memory.js";
+import { recordLifecycleFence } from "../../config/sessions/restart-recovery-state.js";
 import { loadSessionEntry, replaceSessionEntry } from "../../config/sessions/session-accessor.js";
 import * as sessionAccessor from "../../config/sessions/session-accessor.js";
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions/types.js";
@@ -432,7 +435,7 @@ it("preserves live recovery authority while monitoring", async () => {
   await owner.released;
 });
 
-async function busyReply() {
+async function busyReply(withRecoveryFence = true) {
   const fixture = recoveryFixture({ status: undefined, abortedLastRun: false });
   const reply = owned(await fixture.admit());
   const replyReleased = getSessionWorkAdmissionRelease(fixture.scope);
@@ -448,11 +451,13 @@ async function busyReply() {
   };
   const lifecycleGeneration = getAgentEventLifecycleGeneration();
   const fence = [{ runId: "busy-reply", lifecycleGeneration }];
-  await fixture.write({
-    ...fixture.entry,
-    restartRecoveryRuns: fence,
-    restartRecoveryDeliveryRunId: "busy-reply",
-  });
+  if (withRecoveryFence) {
+    await fixture.write({
+      ...fixture.entry,
+      restartRecoveryRuns: fence,
+      restartRecoveryDeliveryRunId: "busy-reply",
+    });
+  }
   const commands: Promise<unknown>[] = [];
   type Command = Parameters<typeof runWithAgentCommandRecoveryOwner<typeof target, string>>[0];
   return {
@@ -460,6 +465,7 @@ async function busyReply() {
     controller: fixture.abort,
     fence,
     read: fixture.read,
+    write: fixture.write,
     finish: async (retainFence = false) => {
       if (!retainFence) {
         await fixture.write({ ...fixture.entry, status: "done" });
@@ -489,6 +495,118 @@ async function busyReply() {
     },
   };
 }
+
+it("waits for a healthy parent reply to yield before executing its queued settle turn", async ({
+  signal,
+}) => {
+  const fixture = await busyReply(false);
+  const child = createSubagentRunRecord({
+    runId: "yielded-child",
+    childSessionKey: "agent:main:subagent:yielded-child",
+    requesterSessionKey: sessionKey,
+    requesterAgentId: "main",
+    expectsCompletionMessage: true,
+    requesterSettleWake: {
+      status: "pending",
+      attemptCount: 0,
+      requesterYieldBatch: true,
+      rearmGeneration: 1,
+      batchRunIds: ["yielded-child"],
+    },
+  });
+  subagentRuns.set(child.runId, child);
+  const prepared = createDeferred();
+  const firstClaim = createDeferred();
+  const releaseFirstClaim = createDeferred();
+  const claim = recoveryStore.claimMainSessionRecoveryOwner;
+  let settleClaims = 0;
+  vi.spyOn(recoveryStore, "claimMainSessionRecoveryOwner").mockImplementation(async (params) => {
+    const result = await claim(params);
+    if (params.runId === "settle-run" && ++settleClaims === 1) {
+      expect(result.kind).toBe("not_required");
+      firstClaim.resolve();
+      await releaseFirstClaim.promise;
+    }
+    return result;
+  });
+  const lifecycleGeneration = fixture.fence[0]!.lifecycleGeneration;
+  let settleStarted = false;
+  try {
+    const settle = fixture.command("settle-run", {
+      opts: {
+        message: "settle-run",
+        runId: "settle-run",
+        abortSignal: fixture.controller.signal,
+        inputProvenance: { kind: "inter_session", sourceTool: "subagent_settle" },
+      },
+      prepare: async () => {
+        prepared.resolve();
+        return fixture.target;
+      },
+      run: async () => {
+        settleStarted = true;
+        // The real recovery owner must have transferred the yielded parent's fence.
+        const admitted = fixture.read()!;
+        expect(admitted.restartRecoveryRuns).toBeUndefined();
+        child.requesterTurnRunId = "settle-run";
+        recordLifecycleFence(admitted, { runId: "settle-run", lifecycleGeneration });
+        await fixture.write({ ...admitted, lifecycleRunId: "settle-run" });
+        const ending = fixture.read()!;
+        const projection = recoveryLifecycle.projectMainSessionRecoveryLifecycle({
+          currentLifecycleGeneration: lifecycleGeneration,
+          entry: ending,
+          event: { runId: "settle-run", lifecycleGeneration, data: { phase: "end" } },
+          snapshotPatch: { status: "done", abortedLastRun: false, endedAt: 2_000 },
+        });
+        expect(projection.action).toBe("apply");
+        if (projection.action === "apply") {
+          await fixture.write({ ...ending, ...projection.patch, lifecycleRunId: undefined });
+        }
+        return "settled";
+      },
+    });
+    await withinTest(
+      awaitGateBeforeSettlement(prepared.promise, settle, "Settle turn skipped preparation"),
+      signal,
+    );
+    await withinTest(
+      awaitGateBeforeSettlement(firstClaim.promise, settle, "Settle turn skipped its first claim"),
+      signal,
+    );
+    expect(settleStarted).toBe(false);
+
+    const yielding = fixture.read()!;
+    yielding.lifecycleRunId = "busy-reply";
+    recordLifecycleFence(yielding, { runId: "busy-reply", lifecycleGeneration });
+    const projection = recoveryLifecycle.projectMainSessionRecoveryLifecycle({
+      currentLifecycleGeneration: lifecycleGeneration,
+      entry: yielding,
+      event: {
+        runId: "busy-reply",
+        lifecycleGeneration,
+        data: { phase: "end", yielded: true, livenessState: "paused", stopReason: "end_turn" },
+      },
+      snapshotPatch: { status: undefined, abortedLastRun: false, endedAt: 1_000 },
+    });
+    expect(projection.action).toBe("apply");
+    if (projection.action === "apply") {
+      await fixture.write({ ...yielding, ...projection.patch });
+    }
+    expect(fixture.read()?.restartRecoveryRuns).toEqual(fixture.fence);
+    releaseFirstClaim.resolve();
+    await fixture.finish(true);
+    await expect(withinTest(settle, signal)).resolves.toBe("settled");
+    expect(fixture.read()).toMatchObject({ status: "done", abortedLastRun: false });
+    expect(fixture.read()?.restartRecoveryRuns).toBeUndefined();
+    await expect(withinTest(fixture.command("next-user-run"), signal)).resolves.toBe(
+      "next-user-run",
+    );
+  } finally {
+    releaseFirstClaim.resolve();
+    subagentRuns.delete(child.runId);
+    await fixture.cleanup();
+  }
+});
 
 function pauseRejectedClaim(runId: string, release?: Promise<void>) {
   const rejected = createDeferred();
