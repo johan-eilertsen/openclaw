@@ -1,7 +1,11 @@
 import { render } from "lit";
 import { describe, expect, it, vi } from "vitest";
 import type { GatewaySessionRow } from "../../api/types.ts";
-import { projectSubagentStatus, type ChatSubagentWait } from "./chat-subagent-wait.ts";
+import {
+  projectProgressCardRuntime,
+  projectSubagentStatus,
+  type ChatSubagentWait,
+} from "./chat-subagent-wait.ts";
 import { renderSubagentActivity } from "./components/chat-subagent-activity.ts";
 import { renderChatWorkingIndicator } from "./components/chat-working-indicator.ts";
 
@@ -441,4 +445,19 @@ describe("chat waiting on subagents", () => {
     expect(container.textContent).toContain("Waiting on 2 sessions");
     expect(control()).toBeNull();
   });
+});
+
+it("counts an interrupted child as stopped only for its current progress snapshot", () => {
+  const session = { ...parent, hasActiveSubagentRun: false };
+  const roster = {
+    subagentSessions: [
+      { ...child, status: "interrupted" as const, hasActiveRun: false, endedAt: 3000 },
+    ],
+    subagentSessionsHydrated: true,
+  };
+  expect(projectProgressCardRuntime(session, roster, 2000)).toMatchObject({
+    hasActiveSubagentRun: false,
+    children: { running: 0, queued: 0, waiting: 0, failed: 0, stopped: 1 },
+  });
+  expect(projectProgressCardRuntime(session, roster, 3001).children?.stopped).toBe(0);
 });
