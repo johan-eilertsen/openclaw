@@ -24,6 +24,7 @@ const dashboardFeatureMethods = [
   "chat.metadata",
   "chat.startup",
   "progressCard.get",
+  "sessions.describe",
   "sessions.list",
   "sessions.patch",
 ];
@@ -90,19 +91,24 @@ suite.define(() => {
   ])("keeps unowned progress paused on $name", async (viewport) => {
     await suite.withPage({ locale: "en-US", viewport }, async ({ page }) => {
       const now = Date.now();
+      const sessionRows = [
+        {
+          hasActiveRun: viewport.name !== "inactive",
+          key: sessionKey,
+          kind: "direct",
+          label: "Later active run",
+          startedAt: now - 60_000,
+          status: "running",
+          updatedAt: now,
+        },
+      ];
       const gateway = await installMockGateway(page, {
         sessionKey,
+        sessions: sessionRows,
         controlUiWidgetKinds: [
           { pluginId: "session", kind: "session:progress", label: "Session progress" },
         ],
-        featureMethods: [
-          "board.get",
-          "chat.metadata",
-          "chat.startup",
-          "progressCard.get",
-          "sessions.list",
-          "sessions.patch",
-        ],
+        featureMethods: dashboardFeatureMethods,
         methodResponses: {
           "board.get": boardResponse(sessionKey),
           "progressCard.get": {
@@ -118,17 +124,7 @@ suite.define(() => {
               ],
             },
           },
-          "sessions.list": chatSessionListResponse([
-            {
-              hasActiveRun: viewport.name !== "inactive",
-              key: sessionKey,
-              kind: "direct",
-              label: "Later active run",
-              startedAt: now - 60_000,
-              status: "running",
-              updatedAt: now,
-            },
-          ]),
+          "sessions.list": chatSessionListResponse(sessionRows),
         },
       });
       const storageKey = controlUiBundledSettingsStorageKey(suite.server.baseUrl);
@@ -325,7 +321,7 @@ suite.define(() => {
               sessionKey,
               revision: 1,
               updatedAt: now - 10_000,
-              markdown: "**Scope-transition dashboard tile** follows the dashboard roster.",
+              markdown: "**Scope-transition dashboard tile** follows its target session.",
               steps: [{ step: "Show the selected scope", status: "in_progress" }],
             },
           },
@@ -384,35 +380,18 @@ suite.define(() => {
       await gateway.resolveDeferred("sessions.describe");
       await expect
         .poll(async () =>
-          (await gateway.getRequests("sessions.list")).some((request) => {
-            const params = request.params as {
-              agentId?: string;
-              archived?: string;
-              hasBoard?: boolean;
-            };
-            // The widget's target roster follows the captured main-agent target,
-            // not the unrelated page filter, and remains archive-inclusive.
-            return (
-              params.agentId === "main" &&
-              params.archived === "all" &&
-              params.hasBoard === undefined
-            );
+          (await gateway.getRequests("sessions.describe")).some((request) => {
+            const params = request.params as { agentId?: string; key?: string };
+            // The descriptor retains the captured target owner across page filters.
+            return params.agentId === "main" && params.key === sessionKey;
           }),
         )
         .toBe(true);
       await expect
         .poll(async () =>
-          (await gateway.getRequests("sessions.list")).some((request) => {
-            const params = request.params as {
-              agentId?: string;
-              archived?: string;
-              hasBoard?: boolean;
-            };
-            return (
-              params.agentId === "writer" &&
-              params.archived === "all" &&
-              params.hasBoard === undefined
-            );
+          (await gateway.getRequests("sessions.describe")).some((request) => {
+            const params = request.params as { agentId?: string; key?: string };
+            return params.agentId === "writer" && params.key === sessionKey;
           }),
         )
         .toBe(false);
@@ -429,8 +408,14 @@ suite.define(() => {
   it("pauses a dashboard card when the session has no active run", async () => {
     const inactiveSessionKey = "agent:main:progress-dashboard-inactive";
     await suite.withPage(englishDesktopPageOptions, async ({ page }) => {
+      const roster = sessionListResponse(inactiveSessionKey, "Inactive progress dashboard", {
+        hasActiveRun: false,
+        startedAt: 3,
+        updatedAt: 3,
+      });
       await installMockGateway(page, {
         sessionKey: inactiveSessionKey,
+        sessions: roster.sessions,
         controlUiWidgetKinds: [
           { pluginId: "session", kind: "session:progress", label: "Session progress" },
         ],
@@ -446,11 +431,7 @@ suite.define(() => {
               steps: [{ step: "Resume the dashboard task", status: "in_progress" }],
             },
           },
-          "sessions.list": sessionListResponse(inactiveSessionKey, "Inactive progress dashboard", {
-            hasActiveRun: false,
-            startedAt: 3,
-            updatedAt: 3,
-          }),
+          "sessions.list": roster,
         },
       });
 
@@ -481,8 +462,14 @@ suite.define(() => {
   it("pauses a dashboard card that predates the current active run", async () => {
     const staleSessionKey = "agent:main:progress-dashboard-stale";
     await suite.withPage(englishDesktopPageOptions, async ({ page }) => {
+      const roster = sessionListResponse(staleSessionKey, "Stale progress dashboard", {
+        hasActiveRun: true,
+        startedAt: 4,
+        updatedAt: 4,
+      });
       await installMockGateway(page, {
         sessionKey: staleSessionKey,
+        sessions: roster.sessions,
         controlUiWidgetKinds: [
           { pluginId: "session", kind: "session:progress", label: "Session progress" },
         ],
@@ -498,11 +485,7 @@ suite.define(() => {
               steps: [{ step: "Show the current run", status: "in_progress" }],
             },
           },
-          "sessions.list": sessionListResponse(staleSessionKey, "Stale progress dashboard", {
-            hasActiveRun: true,
-            startedAt: 4,
-            updatedAt: 4,
-          }),
+          "sessions.list": roster,
         },
       });
 
@@ -531,7 +514,7 @@ suite.define(() => {
     });
   });
 
-  it("reads target liveness from the shared roster independently of board membership", async () => {
+  it("reads target liveness from its descriptor independently of roster membership", async () => {
     const splitRosterSessionKey = "agent:main:progress:dashboard:split-roster";
     await suite.withPage(englishDesktopPageOptions, async ({ page }) => {
       const now = Date.now();
@@ -540,7 +523,7 @@ suite.define(() => {
         startedAt: now - 30_000,
         updatedAt: now,
       });
-      await installMockGateway(page, {
+      const gateway = await installMockGateway(page, {
         sessionKey: splitRosterSessionKey,
         sessions: targetRoster.sessions,
         controlUiWidgetKinds: [
@@ -555,7 +538,7 @@ suite.define(() => {
               revision: 1,
               updatedAt: now,
               markdown: "**Split roster dashboard tile** follows its target session.",
-              steps: [{ step: "Read the dashboard roster", status: "in_progress" }],
+              steps: [{ step: "Read the target session", status: "in_progress" }],
             },
           },
           "sessions.list": {
@@ -570,9 +553,9 @@ suite.define(() => {
                 }),
               },
               {
-                // The shared target roster still reports the live run.
+                // A bounded roster need not contain the explicitly selected target.
                 match: {},
-                response: targetRoster,
+                response: { ...targetRoster, count: 0, sessions: [] },
               },
             ],
           },
@@ -596,7 +579,8 @@ suite.define(() => {
       const card = page.locator('[data-progress-card-placement="board"]');
       await card.waitFor();
       await expect.poll(() => card.textContent()).toContain("Split roster dashboard tile");
-      // Liveness comes from the shared target roster, not the gallery-filtered view.
+      await gateway.waitForRequest("sessions.describe", { match: { key: splitRosterSessionKey } });
+      // The target descriptor owns liveness even outside the held roster.
       await expect.poll(() => card.locator(".session-run-spinner").count()).toBe(1);
       await expect.poll(() => card.locator(".session-progress-card__step--paused").count()).toBe(0);
       await page.screenshot({
@@ -710,8 +694,14 @@ suite.define(() => {
   it("pauses a dashboard card while the successor run is queued", async () => {
     const queuedSessionKey = "agent:main:progress-dashboard-queued";
     await suite.withPage(englishDesktopPageOptions, async ({ page }) => {
+      const roster = sessionListResponse(queuedSessionKey, "Queued progress dashboard", {
+        hasActiveRun: true,
+        status: "queued",
+        updatedAt: 4,
+      });
       await installMockGateway(page, {
         sessionKey: queuedSessionKey,
+        sessions: roster.sessions,
         controlUiWidgetKinds: [
           { pluginId: "session", kind: "session:progress", label: "Session progress" },
         ],
@@ -727,11 +717,7 @@ suite.define(() => {
               steps: [{ step: "Wait for the queued run", status: "in_progress" }],
             },
           },
-          "sessions.list": sessionListResponse(queuedSessionKey, "Queued progress dashboard", {
-            hasActiveRun: true,
-            status: "queued",
-            updatedAt: 4,
-          }),
+          "sessions.list": roster,
         },
       });
 

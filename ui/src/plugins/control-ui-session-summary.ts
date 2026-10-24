@@ -160,9 +160,7 @@ class PluginSessionSummary extends OpenClawLightDomElement {
         }
         this.pending = false;
         this.loading = false;
-        if (this.dirty) {
-          this.requestUpdate();
-        }
+        this.requestUpdate();
       });
   }
 
@@ -266,6 +264,16 @@ class PluginSessionSummary extends OpenClawLightDomElement {
                           row?.startedAt,
                           row?.endedAt,
                           row?.hasActiveRun === true,
+                          false,
+                          undefined,
+                          undefined,
+                          undefined,
+                          {
+                            hasActiveSubagentRun: row?.hasActiveSubagentRun,
+                            known: Boolean(row) && !this.error && !this.pending,
+                            connected: this.gateway?.snapshot.phase === "connected",
+                            lastRunError: row?.lastRunError,
+                          },
                         )
                       : nothing
               }

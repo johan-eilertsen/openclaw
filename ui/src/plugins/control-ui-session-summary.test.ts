@@ -1,3 +1,4 @@
+import type { ProgressCard } from "@openclaw/gateway-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentIdentityResult } from "../api/types.ts";
 import {
@@ -6,6 +7,7 @@ import {
   GATEWAY_STORE_TEST_HELLO,
 } from "../app/gateway-store.test-support.ts";
 import type { ApplicationGateway } from "../app/gateway.ts";
+import { t } from "../i18n/index.ts";
 import { createAgentIdentityCapability } from "../lib/agents/identity.ts";
 import type { ChatHistoryResult } from "../pages/chat/chat-history-snapshot.ts";
 import "./control-ui-session-summary.ts";
@@ -19,7 +21,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function setup(identity?: () => AgentIdentityResult) {
+function setup(identity?: () => AgentIdentityResult, progressCard?: ProgressCard) {
   const { gateway, current } = createGatewayStoreTestStore();
   gateways.push(gateway);
   gateway.start();
@@ -27,18 +29,19 @@ function setup(identity?: () => AgentIdentityResult) {
   const requests: Array<{
     params: unknown;
     resolve: (history: ChatHistoryResult) => void;
+    reject: (error: Error) => void;
   }> = [];
   current().request.mockImplementation((method, params) => {
     if (method === "chat.history") {
-      return new Promise<ChatHistoryResult>((resolve) => {
-        requests.push({ params, resolve });
+      return new Promise<ChatHistoryResult>((resolve, reject) => {
+        requests.push({ params, resolve, reject });
       });
     }
     if (method === "agent.identity.get" && identity) {
       return Promise.resolve(identity());
     }
     if (method === "progressCard.get") {
-      return Promise.resolve({ card: null });
+      return Promise.resolve({ card: progressCard ?? null });
     }
     return Promise.reject(new Error(`Unexpected method: ${method}`));
   });
@@ -58,6 +61,45 @@ function history(text: string): ChatHistoryResult {
 }
 
 describe("plugin session summary freshness", () => {
+  it("marks retained activity unavailable when its history refresh fails", async () => {
+    const { element, requests, emit } = setup(undefined, {
+      sessionKey: "agent:main:one",
+      revision: 1,
+      updatedAt: 101,
+      steps: [{ step: "Collect findings", status: "in_progress" }],
+    });
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    requests[0]!.resolve({
+      ...history("Initial reply"),
+      sessionInfo: {
+        key: "agent:main:one",
+        sessionId: "one-run",
+        kind: "direct",
+        updatedAt: 110,
+        startedAt: 100,
+        status: "running",
+        hasActiveRun: true,
+      },
+    });
+    const runtime = () => element.querySelector(".session-progress-card__runtime")?.textContent;
+    await vi.waitFor(() => expect(runtime()).toContain(t("sessionProgressCard.runtime.working")));
+
+    emit("sessions.changed");
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(runtime()).toContain(t("sessionProgressCard.runtime.unknown"));
+    requests[1]!.reject(new Error("History unavailable"));
+    await vi.waitFor(() =>
+      expect(element.querySelector('[role="alert"]')?.textContent).toContain(
+        t("pluginUi.sessionHistoryUnavailable"),
+      ),
+    );
+    expect(runtime()).toContain(t("sessionProgressCard.runtime.unknown"));
+    expect(element.querySelector(".session-run-spinner")).toBeNull();
+    expect(element.querySelector(".session-progress-card")?.textContent).toContain(
+      "Collect findings",
+    );
+  });
+
   it("refreshes visible message avatars from identity and stops hydrating while hidden", async () => {
     let avatar = "data:image/png;base64,aWRlbnRpdHk=";
     const { element, requests, current } = setup(() => ({ agentId: "main", name: "Main", avatar }));
@@ -164,7 +206,12 @@ describe("plugin session summary freshness", () => {
   });
 
   it("refreshes the same session on durable events and coalesces updates during a pending load", async () => {
-    const { element, requests, emit } = setup();
+    const { element, requests, emit } = setup(undefined, {
+      sessionKey: "agent:main:one",
+      revision: 1,
+      updatedAt: 101,
+      steps: [{ step: "Collect findings", status: "in_progress" }],
+    });
     await vi.waitFor(() => expect(requests).toHaveLength(1));
     requests[0]!.resolve(history("Initial reply"));
     await vi.waitFor(() => expect(element.textContent).toContain("Initial reply"));
@@ -183,9 +230,25 @@ describe("plugin session summary freshness", () => {
     expect(requests).toHaveLength(2);
     requests[1]!.resolve(history("Intermediate reply"));
     await vi.waitFor(() => expect(requests).toHaveLength(3));
-    requests[2]!.resolve(history("Final reply"));
+    requests[2]!.resolve({
+      ...history("Final reply"),
+      sessionInfo: {
+        key: "agent:main:one",
+        sessionId: "one-run",
+        kind: "direct",
+        updatedAt: 110,
+        startedAt: 100,
+        endedAt: 110,
+        status: "done",
+        hasActiveRun: false,
+        hasActiveSubagentRun: true,
+      },
+    });
     await vi.waitFor(() => expect(element.textContent).toContain("Final reply"));
     expect(element.textContent).not.toContain("Initial reply");
+    expect(element.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      t("sessionProgressCard.runtime.delegated"),
+    );
 
     element.presented = false;
     await element.updateComplete;

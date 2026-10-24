@@ -1,5 +1,6 @@
 import type { GatewaySessionRow } from "../../api/types.ts";
 import { resolveSessionDisplayName } from "../../lib/session-display.ts";
+import type { SessionProgressCardRuntime } from "../../lib/session-progress-runtime.ts";
 import { isSessionRunActive } from "../../lib/session-run-state.ts";
 import {
   areUiSessionKeysEquivalent,
@@ -37,7 +38,7 @@ export type ChatSubagentActivity = {
 
 // A count or a name says which children are left, so it waits for the pane's
 // own child query. Rows seeded from another list can hold only some of them.
-function unfinishedChildren(session: GatewaySessionRow, roster: SubagentRoster) {
+function directChildren(session: GatewaySessionRow, roster: SubagentRoster) {
   if (!roster.subagentSessionsHydrated) {
     return [];
   }
@@ -45,13 +46,56 @@ function unfinishedChildren(session: GatewaySessionRow, roster: SubagentRoster) 
     const parent = resolveUiSessionNavigationParentKey(row);
     return (
       !row.archived &&
-      (row.status === "queued" || isUnfinishedSubagent(row)) &&
       !areUiSessionKeysEquivalent(row.key, session.key) &&
       (parent
         ? areUiSessionKeysEquivalent(parent, session.key)
         : session.childSessions?.some((key) => areUiSessionKeysEquivalent(key, row.key)))
     );
   });
+}
+
+/** Project the existing child query without another status owner or history read. */
+export function projectProgressCardRuntime(
+  session: GatewaySessionRow | undefined,
+  roster: SubagentRoster,
+  updatedAt: number,
+): SessionProgressCardRuntime {
+  let childError: string | undefined;
+  const children =
+    session && roster.subagentSessionsHydrated
+      ? { running: 0, queued: 0, waiting: 0, failed: 0, stopped: 0 }
+      : undefined;
+  if (session && children) {
+    for (const row of directChildren(session, roster)) {
+      if (row.status === "queued") {
+        children.queued++;
+      } else if (isSessionRunActive(row)) {
+        children.running++;
+      } else if (row.hasActiveSubagentRun) {
+        children.waiting++;
+      } else if (row.endedAt !== undefined && row.endedAt >= updatedAt) {
+        // A newer authored snapshot has already had a chance to reconcile this
+        // outcome. Never carry failures from an older task into a new card.
+        if (row.status === "failed" || row.status === "timeout") {
+          children.failed++;
+          childError ??= row.lastRunError
+            ? `${resolveSessionDisplayName(row.key, row)}: ${row.lastRunError}`
+            : resolveSessionDisplayName(row.key, row);
+        } else if (row.status === "killed") {
+          children.stopped++;
+        }
+      }
+    }
+  }
+  return {
+    known: Boolean(session),
+    hasActiveSubagentRun:
+      session?.hasActiveSubagentRun === true ||
+      Boolean(children && children.running + children.queued + children.waiting > 0),
+    lastRunError: session?.lastRunError,
+    childError,
+    children,
+  };
 }
 
 /**
@@ -78,7 +122,11 @@ export function projectSubagentStatus(
     yieldedAt !== null && typeof session?.startedAt === "number" && yieldedAt > session.startedAt
       ? yieldedAt
       : null;
-  const unfinished = eligible ? unfinishedChildren(session, input) : [];
+  const unfinished = eligible
+    ? directChildren(session, input).filter(
+        (row) => row.status === "queued" || isUnfinishedSubagent(row),
+      )
+    : [];
   // Dashboard children count as sessions, never named subagents.
   const children = unfinished.filter((row) => !isDashboardSessionKey(row.key));
   const running = children.length;

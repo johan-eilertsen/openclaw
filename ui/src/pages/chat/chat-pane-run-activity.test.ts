@@ -22,6 +22,97 @@ function sessionsResult(rows: GatewaySessionRow[]): SessionsListResult {
 describe.each([false, true])("chat run activity (recovery ready: %s)", (recoveryScopeReady) => {
   afterEach(() => resetChatComposerState());
 
+  it("keeps the retained progress card in sync with the owned child roster", () => {
+    const parentKey = "agent:main:main";
+    const parent: GatewaySessionRow = {
+      key: parentKey,
+      kind: "direct",
+      status: "done",
+      hasActiveRun: false,
+      hasActiveSubagentRun: true,
+      startedAt: 1_000,
+      endedAt: 3_000,
+    };
+    const rows: GatewaySessionRow[] = Array.from({ length: 5 }, (_, index) => ({
+      key: `agent:main:subagent:worker-${index}`,
+      kind: "direct",
+      spawnedBy: parentKey,
+      status: index < 2 ? "running" : "queued",
+      hasActiveRun: index < 2,
+    }));
+    const client = {
+      request: async () => ({}),
+      recoveryScopeReady,
+    } as unknown as GatewayBrowserClient;
+    const { pane, state, context } = createRefreshChatPane(client);
+    context.gateway.snapshot.hello = sessionMutationGatewayHello(["operator.write"]);
+    state.sessionKey = parentKey;
+    state.sessionsResult = sessionsResult([parent]);
+    pane.render();
+    const container = document.createElement("div");
+    const props = {
+      ...pane.chatProps!,
+      connected: true,
+      loading: false,
+      progressCard: {
+        sessionKey: parentKey,
+        revision: 1,
+        updatedAt: 2_000,
+        steps: [{ step: "Collect the results", status: "in_progress" as const }],
+      },
+      subagentSessions: rows,
+      subagentSessionsHydrated: false,
+    };
+    render(renderChat(props), container);
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "Waiting for delegated work",
+    );
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).not.toContain(
+      "2 running",
+    );
+
+    props.subagentSessionsHydrated = true;
+    render(renderChat(props), container);
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "2 running · 3 queued",
+    );
+    rows[0] = {
+      ...rows[0]!,
+      label: "Research",
+      status: "failed",
+      hasActiveRun: false,
+      endedAt: 4_000,
+      lastRunError: "The service is unavailable.",
+    };
+    rows[1] = { ...rows[1]!, status: "done", hasActiveRun: false, endedAt: 4_000 };
+    render(renderChat({ ...props, subagentSessions: [...rows] }), container);
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "3 queued · 1 failed",
+    );
+    expect(container.querySelector("[data-complete]")?.getAttribute("data-complete")).toBe("false");
+    expect(container.querySelector(".session-progress-card__runtime-detail")?.textContent).toBe(
+      "Research: The service is unavailable.",
+    );
+    // A later authored snapshot reconciles the old failure. Siblings do not count.
+    render(
+      renderChat({
+        ...props,
+        progressCard: { ...props.progressCard, updatedAt: 5_000 },
+        subagentSessions: [
+          ...rows,
+          { ...rows[0]!, key: "agent:main:subagent:other", spawnedBy: "agent:main:other" },
+        ],
+      }),
+      container,
+    );
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "3 queued",
+    );
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).not.toContain(
+      "failed",
+    );
+  });
+
   it.each([
     {
       name: "shows a completed parent waiting on its visible child, not working",

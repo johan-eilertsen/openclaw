@@ -180,7 +180,12 @@ export class SessionProgressHovercardProvider extends ReactiveElement {
       return;
     }
     this.progressCards = sessionProgressCardsForGateway(this.applicationGateway);
-    this.stopProgressCardUpdates = this.progressCards.subscribe(this.handleCardUpdate);
+    const stopCards = this.progressCards.subscribe(this.handleCardUpdate);
+    const stopGateway = this.applicationGateway.subscribe(this.handleCardUpdate);
+    this.stopProgressCardUpdates = () => {
+      stopCards();
+      stopGateway();
+    };
   }
 
   private disconnectStore(): void {
@@ -399,6 +404,7 @@ export class SessionProgressHovercardProvider extends ReactiveElement {
       password: gateway?.connection.password,
     });
     const revision = JSON.stringify({
+      connected: gateway?.snapshot.phase === "connected",
       progress: this.lastProgressCard?.revision ?? null,
       pullRequests: pullRequests
         ? {
@@ -415,6 +421,8 @@ export class SessionProgressHovercardProvider extends ReactiveElement {
             boardFace: sidebarRow.boardFace,
             hasAutomation: sidebarRow.hasAutomation,
             hasActiveRun: sidebarRow.hasActiveRun,
+            hasActiveSubagentRun: sidebarRow.hasActiveSubagentRun,
+            lastRunError: sidebarRow.lastRunError,
             channelAvatarUrl: sidebarRow.channelAvatarUrl,
             channelPresentation: sidebarRow.channelPresentation,
             lastMessagePreview: sidebarRow.lastMessagePreview,
@@ -465,6 +473,7 @@ export class SessionProgressHovercardProvider extends ReactiveElement {
     render(
       renderSessionHovercard({
         row: sidebarRow,
+        connected: gateway?.snapshot.phase === "connected",
         selfUserId: this.applicationContext?.gateway.snapshot.selfUser?.id,
         avatarAuth: channelAvatarAuth,
         personActivity: this.personActivity(),

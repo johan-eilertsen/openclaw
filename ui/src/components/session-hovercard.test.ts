@@ -541,7 +541,15 @@ describe("renderSessionHovercard", () => {
           ...(mode === "active" ? { lastMessagePreview: "This must not appear." } : {}),
           ...(mode === "completed" ? { status: "done" } : {}),
         }),
-        progressCard: { ...card, steps: mode === "markdown-only" ? undefined : card.steps },
+        progressCard: {
+          ...card,
+          steps:
+            mode === "markdown-only"
+              ? undefined
+              : mode === "completed"
+                ? [{ step: "Verify", status: "completed" }]
+                : card.steps,
+        },
       });
 
       const plan = container.querySelector(".session-hovercard__plan-row");
@@ -562,6 +570,35 @@ describe("renderSessionHovercard", () => {
       expect(container.querySelector("time")).toBeNull();
       expect(container.querySelector(".session-hovercard__excerpt")).toBeNull();
       expect(container.textContent).not.toContain("This must not appear.");
+    },
+  );
+
+  it.each(["failed", "timeout", "killed"] as const)(
+    "shows the matching %s outcome and does not attach it to a later snapshot",
+    (status) => {
+      const card = progressCard();
+      const state = row({
+        status,
+        hasActiveRun: false,
+        startedAt: card.updatedAt - 1000,
+        endedAt: card.updatedAt + 1000,
+        lastRunError: "The service is unavailable.",
+      });
+      const container = renderCard({ row: state, progressCard: card });
+      expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+        status === "killed" ? "Stopped" : "Failed",
+      );
+      if (status !== "killed") {
+        expect(container.textContent).toContain("The service is unavailable.");
+      }
+      const newer = renderCard({
+        row: state,
+        progressCard: { ...card, updatedAt: card.updatedAt + 2000 },
+      });
+      expect(newer.textContent).not.toContain("The service is unavailable.");
+      expect(newer.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+        "No active work",
+      );
     },
   );
 

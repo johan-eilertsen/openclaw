@@ -10,8 +10,8 @@ import { OpenClawLightDomElement } from "../../../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../../../lit/subscriptions-controller.ts";
 import { resolveSessionProgressCardTarget } from "../../session-progress-cards.ts";
 import { isSessionRunActive } from "../../session-run-state.ts";
+import type { SessionRowObservation } from "../../sessions/session-capability.ts";
 import { parseAgentSessionKey } from "../../sessions/session-key.ts";
-import { sessionProgressTargetQuery } from "../../sessions/session-requests.ts";
 import type { BoardWidget } from "../types.ts";
 
 function resolveSessionTarget(
@@ -34,9 +34,15 @@ class OpenClawSessionProgressWidget extends OpenClawLightDomElement {
   @property({ attribute: false }) session: BoardGetParams = { sessionKey: "" };
   @property({ attribute: false }) active = true;
 
-  private observedSessions?: ApplicationContext["sessions"];
-  private observedTargetAgentId?: string;
-  private unsubscribeList?: () => void;
+  private rowBinding?: {
+    sessions: ApplicationContext["sessions"];
+    sessionKey: string;
+    agentId: string;
+    observation?: SessionRowObservation;
+    unavailable: boolean;
+    reading: boolean;
+    retry?: () => void;
+  };
 
   private readonly progressCard = new SessionProgressCardController(this, {
     gateway: () =>
@@ -48,27 +54,23 @@ class OpenClawSessionProgressWidget extends OpenClawLightDomElement {
 
   constructor() {
     super();
-    void new SubscriptionsController(this).effect(
-      () => this.context?.agentSelection,
-      (agentSelection) => {
-        this.bindSessionList();
-        return agentSelection.subscribe(() => this.bindSessionList());
-      },
-    );
+    new SubscriptionsController(this)
+      .watchStore(() => this.context?.gateway)
+      .watchStore(() => this.context?.agentSelection);
   }
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.bindSessionList();
+    this.bindSessionRow();
   }
 
   override disconnectedCallback(): void {
-    this.releaseSessionList();
+    this.releaseSessionRow();
     super.disconnectedCallback();
   }
 
   override willUpdate(): void {
-    this.bindSessionList();
+    this.bindSessionRow();
   }
 
   override render() {
@@ -109,18 +111,7 @@ class OpenClawSessionProgressWidget extends OpenClawLightDomElement {
         ${t("sessionProgressCard.widgetEmpty")}
       </p>`;
     }
-    const identity = resolveSessionProgressCardTarget(
-      this.context?.gateway.snapshot ?? {},
-      resolveSessionTarget(this.widget, this.session),
-    );
-    const targetQuery = sessionProgressTargetQuery(identity.agentId);
-    const row = this.context?.sessions
-      .listSnapshot(targetQuery)
-      .result?.sessions.find(
-        (entry) =>
-          entry.key === identity.sessionKey &&
-          (entry.agentId ?? parseAgentSessionKey(entry.key)?.agentId) === identity.agentId,
-      );
+    const row = this.rowBinding?.observation?.row;
     return html`${errorNotice}${renderSessionProgressCard(
       card,
       "board",
@@ -129,10 +120,33 @@ class OpenClawSessionProgressWidget extends OpenClawLightDomElement {
       row?.startedAt,
       row?.endedAt,
       isSessionRunActive(row ?? {}),
-    )}`;
+      false,
+      undefined,
+      undefined,
+      undefined,
+      {
+        hasActiveSubagentRun: row?.hasActiveSubagentRun,
+        known: Boolean(row) && !this.rowBinding?.unavailable,
+        connected: this.context?.gateway.snapshot.phase === "connected",
+        lastRunError: row?.lastRunError,
+      },
+    )}${
+      this.rowBinding?.unavailable
+        ? html`<button
+            class="btn btn--sm"
+            type="button"
+            data-test-id="session-progress-runtime-retry"
+            title=${t("sessionProgressCard.runtime.unknown")}
+            ?disabled=${this.rowBinding.reading}
+            @click=${this.rowBinding.retry}
+          >
+            ${t("common.retry")}
+          </button>`
+        : nothing
+    }`;
   }
 
-  private bindSessionList(): void {
+  private bindSessionRow(): void {
     const context = this.context;
     // Lit can flush queued updates after removal; don't reacquire the released listener.
     if (!this.isConnected || !context) {
@@ -145,36 +159,83 @@ class OpenClawSessionProgressWidget extends OpenClawLightDomElement {
     );
     const targetAgentId = identity.agentId;
     const shouldObserve =
-      this.active && Boolean(resolveSessionTarget(this.widget, this.session).sessionKey);
-    if (!shouldObserve) {
-      this.releaseSessionList();
+      this.active &&
+      Boolean(resolveSessionTarget(this.widget, this.session).sessionKey) &&
+      context.gateway.snapshot.phase === "connected";
+    if (!shouldObserve || !targetAgentId) {
+      this.releaseSessionRow();
       return;
     }
-    if (sessions === this.observedSessions && targetAgentId === this.observedTargetAgentId) {
-      return;
-    }
-    this.releaseSessionList();
-    this.observedSessions = sessions;
-    this.observedTargetAgentId = targetAgentId;
-    const query = sessionProgressTargetQuery(targetAgentId);
-    this.unsubscribeList = sessions.subscribeList(query, () => this.requestUpdate());
-    const snapshot = sessions.listSnapshot(query);
-    this.requestUpdate();
     if (
-      !snapshot.result &&
-      !snapshot.loading &&
-      !snapshot.error &&
-      context.gateway.snapshot.phase === "connected"
+      sessions === this.rowBinding?.sessions &&
+      targetAgentId === this.rowBinding.agentId &&
+      identity.sessionKey === this.rowBinding.sessionKey &&
+      this.rowBinding.observation?.isCurrent()
     ) {
-      void sessions.refreshList(query);
+      return;
     }
+    this.releaseSessionRow();
+    const binding: NonNullable<OpenClawSessionProgressWidget["rowBinding"]> = {
+      sessions,
+      sessionKey: identity.sessionKey,
+      agentId: targetAgentId,
+      unavailable: false,
+      reading: false,
+    };
+    this.rowBinding = binding;
+    const current = () =>
+      this.rowBinding === binding && this.context === context && this.isConnected && this.active;
+    const refresh = async () => {
+      if (binding.reading || !current() || !binding.observation?.isCurrent()) {
+        return;
+      }
+      binding.reading = true;
+      this.requestUpdate();
+      try {
+        while (current() && binding.observation.isCurrent()) {
+          const reconcile = binding.observation.captureReconcile();
+          const { session } = await sessions.describe({
+            key: binding.sessionKey,
+            agentId: binding.agentId,
+          });
+          if (!current()) {
+            break;
+          }
+          const outcome = reconcile(session ?? undefined);
+          if (outcome.status === "current") {
+            binding.unavailable = false;
+          }
+          if (outcome.status !== "invalidated") {
+            break;
+          }
+        }
+      } catch {
+        // Keep the saved plan; unknown runtime state is rendered explicitly.
+        if (current()) {
+          binding.unavailable = true;
+        }
+      } finally {
+        binding.reading = false;
+        if (current()) {
+          this.requestUpdate();
+        }
+      }
+    };
+    binding.retry = () => void refresh();
+    binding.observation = sessions.observeRow(
+      { key: binding.sessionKey, agentId: binding.agentId },
+      () => {
+        binding.unavailable = false;
+        this.requestUpdate();
+      },
+      { onInvalidate: () => void refresh() },
+    );
+    void refresh();
   }
 
-  private releaseSessionList(): void {
-    this.unsubscribeList?.();
-    this.unsubscribeList = undefined;
-    this.observedSessions = undefined;
-    this.observedTargetAgentId = undefined;
+  private releaseSessionRow(): void {
+    this.rowBinding?.observation?.dispose();
+    this.rowBinding = undefined;
   }
 }
 

@@ -6,8 +6,10 @@ import { directive } from "lit/directive.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { pruneMapToMaxSize } from "../../../src/infra/map-size.ts";
 import { i18n, t } from "../i18n/index.ts";
+import { formatUiExternalText } from "../lib/format-error.ts";
 import { formatRelativeTimestamp } from "../lib/format.ts";
 import type { SessionProgressCardRefreshState } from "../lib/session-progress-cards.ts";
+import type { SessionProgressCardRuntime } from "../lib/session-progress-runtime.ts";
 import { icons } from "./icons.ts";
 import { toSanitizedMarkdownHtml } from "./markdown.ts";
 import { scrollState } from "./scroll-state.ts";
@@ -92,13 +94,11 @@ const STATUS_LABEL_KEYS: Record<ProgressCardStep["status"], Parameters<typeof t>
   pending: "sessionProgressCard.status.pending",
 };
 
-const TERMINAL_RUN_OUTCOMES: Partial<Record<SessionRunStatus, "completed" | "failed" | "stopped">> =
-  {
-    done: "completed",
-    failed: "failed",
-    killed: "stopped",
-    timeout: "failed",
-  };
+const TERMINAL_RUN_OUTCOMES: Partial<Record<SessionRunStatus, "failed" | "stopped">> = {
+  failed: "failed",
+  killed: "stopped",
+  timeout: "failed",
+};
 
 class ProgressActivityTimeDirective extends AsyncDirective {
   private timestamp = 0;
@@ -177,14 +177,37 @@ function isProgressCardStaleForRun(card: ProgressCard, startedAt?: number): bool
   return runStart !== undefined && cardUpdate !== undefined && cardUpdate < runStart;
 }
 
+/** A session outcome only describes a plan written during that same run. */
+export function progressCardRunOutcome(
+  card: ProgressCard | null | undefined,
+  sessionStatus?: SessionRunStatus,
+  startedAt?: number,
+  endedAt?: number,
+) {
+  const start = asDateTimestampMs(startedAt);
+  const end = asDateTimestampMs(endedAt);
+  const updated = asDateTimestampMs(card?.updatedAt);
+  return sessionStatus &&
+    start !== undefined &&
+    end !== undefined &&
+    updated !== undefined &&
+    end >= start &&
+    updated >= start &&
+    updated <= end
+    ? TERMINAL_RUN_OUTCOMES[sessionStatus]
+    : undefined;
+}
+
 export function progressCardHeadsUp(
   card: ProgressCard | null | undefined,
   sessionStatus?: SessionRunStatus,
   startedAt?: number,
   hasActiveRun = true,
+  hasActiveSubagentRun = false,
+  endedAt?: number,
 ): ProgressCardHeadsUp | null {
   const staleForRun = card ? isProgressCardStaleForRun(card, startedAt) : false;
-  if (sessionStatus && TERMINAL_RUN_OUTCOMES[sessionStatus] && !staleForRun) {
+  if (!hasActiveSubagentRun && progressCardRunOutcome(card, sessionStatus, startedAt, endedAt)) {
     return null;
   }
   const counts = card ? progressCounts(card) : null;
@@ -196,7 +219,10 @@ export function progressCardHeadsUp(
     return null;
   }
   const status =
-    step.status === "in_progress" && (staleForRun || !hasActiveRun) ? "paused" : step.status;
+    step.status === "in_progress" &&
+    (staleForRun || (!hasActiveSubagentRun && (!hasActiveRun || sessionStatus === "done")))
+      ? "paused"
+      : step.status;
   return { ...counts, status, step: step.step };
 }
 
@@ -207,7 +233,7 @@ function currentProgressStep(steps: readonly ProgressCardStep[]): ProgressCardSt
 function progressStepMarker(status: PresentedProgressStepStatus, sessionStatus?: SessionRunStatus) {
   const outcome = sessionStatus && TERMINAL_RUN_OUTCOMES[sessionStatus];
   if (status === "in_progress" && outcome) {
-    return outcome === "completed" ? icons.check : icons.circleX;
+    return icons.circleX;
   }
   switch (status) {
     case "completed":
@@ -332,6 +358,65 @@ function renderProgressCardAction(
   </button>`;
 }
 
+export function renderSessionProgressRuntime(
+  runtime?: SessionProgressCardRuntime,
+  hasActiveRun = false,
+  sessionStatus?: SessionRunStatus,
+  terminalOutcome?: "failed" | "stopped",
+) {
+  if (!runtime) {
+    return nothing;
+  }
+  const children = runtime.children;
+  const parts = children
+    ? (["running", "queued", "waiting", "failed", "stopped"] as const).flatMap((state) =>
+        children[state]
+          ? [t(`sessionProgressCard.runtime.${state}`, { count: String(children[state]) })]
+          : [],
+      )
+    : [];
+  const unavailable = runtime.connected === false || runtime.known === false;
+  const hasFailure = !unavailable && (terminalOutcome === "failed" || Boolean(children?.failed));
+  const label =
+    runtime.connected === false
+      ? t("sessionProgressCard.runtime.offline")
+      : runtime.known === false
+        ? t("sessionProgressCard.runtime.unknown")
+        : parts.length
+          ? [
+              terminalOutcome ? t(`sessionProgressCard.outcome.${terminalOutcome}`) : "",
+              t("sessionProgressCard.runtime.children", { activity: parts.join(" · ") }),
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          : runtime.hasActiveSubagentRun
+            ? t("sessionProgressCard.runtime.delegated")
+            : terminalOutcome
+              ? t(`sessionProgressCard.outcome.${terminalOutcome}`)
+              : sessionStatus === "queued"
+                ? t("sessionProgressCard.runtime.queuedSelf")
+                : hasActiveRun && sessionStatus !== "done"
+                  ? t("sessionProgressCard.runtime.working")
+                  : t("sessionProgressCard.runtime.idle");
+  const detail = unavailable
+    ? ""
+    : formatUiExternalText(
+        terminalOutcome === "failed"
+          ? runtime.lastRunError
+          : children?.failed
+            ? runtime.childError
+            : undefined,
+      ).slice(0, 240);
+  return html`<span
+    class="session-progress-card__runtime"
+    data-error=${String(hasFailure)}
+    role="status"
+  >
+    <span>${label}</span
+    >${detail ? html`<span class="session-progress-card__runtime-detail">${detail}</span>` : nothing}
+  </span>`;
+}
+
 export function renderSessionProgressCard(
   card: ProgressCard | null | undefined,
   placement: SessionProgressCardPlacement,
@@ -344,6 +429,7 @@ export function renderSessionProgressCard(
   composerDisclosureContext?: ComposerProgressDisclosureContext,
   refreshAction?: SessionProgressCardRefreshAction,
   onClearSaved?: (card: ProgressCard) => void,
+  runtime?: SessionProgressCardRuntime,
 ) {
   if (!card) {
     return nothing;
@@ -358,25 +444,24 @@ export function renderSessionProgressCard(
   const validStartedAt = asDateTimestampMs(startedAt);
   const validEndedAt = asDateTimestampMs(endedAt);
   const validUpdatedAt = asDateTimestampMs(card.updatedAt);
-  const hasValidRunWindow =
-    validStartedAt !== undefined &&
-    validEndedAt !== undefined &&
-    validEndedAt >= validStartedAt &&
-    validUpdatedAt !== undefined &&
-    validUpdatedAt >= validStartedAt &&
-    validUpdatedAt <= validEndedAt;
+  const runOutcome = progressCardRunOutcome(card, sessionStatus, startedAt, endedAt);
   // A refreshed snapshot written after a run ended belongs to the new status
   // check, not that run’s old completion time or outcome.
   // A later run does not own durable progress last updated before it starts.
   // Queued runs can retain the previous run's timestamps, but do not own its progress.
   const hasCurrentRunActivity =
-    hasActiveRun &&
+    runtime?.connected !== false &&
+    runtime?.known !== false &&
+    (runtime?.hasActiveSubagentRun === true || (hasActiveRun && sessionStatus !== "done")) &&
     !isProgressCardStaleForRun(card, startedAt) &&
     (validUpdatedAt === undefined ||
       (sessionStatus !== "queued" &&
         (validStartedAt !== undefined || sessionStatus === undefined)));
   const terminalTimestamp =
-    sessionStatus && TERMINAL_RUN_OUTCOMES[sessionStatus] && hasValidRunWindow
+    runOutcome &&
+    !runtime?.hasActiveSubagentRun &&
+    runtime?.connected !== false &&
+    runtime?.known !== false
       ? validEndedAt
       : undefined;
   const effectiveSessionStatus =
@@ -388,6 +473,7 @@ export function renderSessionProgressCard(
     ? (`sessionProgressCard.activity.${TERMINAL_RUN_OUTCOMES[sessionStatus!]!}` as const)
     : "sessionProgressCard.activity.updated";
   const lastActivity = progressActivityTime(activityTimestamp, activityKey);
+  const activity = renderSessionProgressRuntime(runtime, hasActiveRun, sessionStatus, runOutcome);
   const dismiss = renderProgressCardAction(card, "dismiss", onDismiss);
   const clearSaved = renderProgressCardAction(card, "clear-saved", onClearSaved);
   if (placement === "composer") {
@@ -414,9 +500,7 @@ export function renderSessionProgressCard(
         ? "paused"
         : currentStep?.status;
     const summaryIndicator = terminalOutcome
-      ? terminalOutcome === "completed"
-        ? icons.check
-        : icons.circleX
+      ? icons.circleX
       : complete
         ? icons.check
         : currentStep?.status === "in_progress"
@@ -435,12 +519,10 @@ export function renderSessionProgressCard(
       <summary class="session-progress-card__summary" aria-label=${summaryLabel}>
         <span
           class="session-progress-card__summary-indicator session-progress-card__current-marker${
-            complete || effectiveSessionStatus === "done"
-              ? " session-progress-card__summary-indicator--complete"
-              : ""
+            complete ? " session-progress-card__summary-indicator--complete" : ""
           }"
           data-status=${presentedCurrentStatus ?? "pending"}
-          data-outcome=${effectiveSessionStatus ?? nothing}
+          data-outcome=${terminalOutcome ? effectiveSessionStatus : nothing}
           aria-hidden="true"
         >
           ${summaryIndicator}
@@ -452,7 +534,7 @@ export function renderSessionProgressCard(
           counts
             ? html`<span
                 class="session-progress-card__summary-count session-progress-card__summary-count--collapsed"
-                data-outcome=${effectiveSessionStatus ?? nothing}
+                data-outcome=${terminalOutcome ? effectiveSessionStatus : nothing}
                 >${outcomeLabel ?? `${currentPosition}/${counts.total}`}</span
               >`
             : nothing
@@ -473,6 +555,7 @@ export function renderSessionProgressCard(
             >${icons.chevronDown}</span
           >
         </span>
+        ${activity}
         ${
           refreshAction?.state
             ? html`<span
@@ -508,6 +591,7 @@ export function renderSessionProgressCard(
         >${dismiss}
       </span>
     </div>
+    ${activity}
     <div class="session-progress-card__body">
       ${renderProgressCardMarkdown(card.markdown)}
       ${renderSteps(card, hasCurrentRunActivity, effectiveSessionStatus)}

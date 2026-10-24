@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { GatewayRequestError } from "../api/gateway.ts";
 import type { ApplicationContext } from "../app/context.ts";
 import type { ApplicationGateway } from "../app/gateway.ts";
+import { t } from "../i18n/index.ts";
 import { sessionProgressCardsForGateway } from "../lib/session-progress-cards.ts";
 import { SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD } from "../lib/session-pull-requests.ts";
 import type { SidebarSessionHovercardRow } from "./app-sidebar-session-types.ts";
@@ -248,15 +249,34 @@ describe("session progress hovercard ownership", () => {
       const portal = document.querySelector(".session-progress-hovercard");
       expect(portal?.textContent).toContain("research progress");
       harness.emitPullRequestStatus("ready");
-      expect(portal?.querySelector('[role="status"]')).toBeNull();
+      expect(portal?.querySelector('.session-hovercard__more[role="status"]')).toBeNull();
 
       harness.emitPullRequestStatus(status);
-      expect(portal?.querySelector('[role="status"]')?.textContent?.trim()).toBe(warning);
+      expect(
+        portal?.querySelector('.session-hovercard__more[role="status"]')?.textContent?.trim(),
+      ).toBe(warning);
       harness.emitPullRequestStatus("ready");
-      expect(portal?.querySelector('[role="status"]')).toBeNull();
+      expect(portal?.querySelector('.session-hovercard__more[role="status"]')).toBeNull();
       expect(document.querySelector(".session-progress-hovercard")).toBe(portal);
     },
   );
+
+  it("updates a held progress card when only delegated work becomes active", async () => {
+    vi.useFakeTimers();
+    const harness = mountHovercard("agent:research:main");
+    harness.updateRow({ hasActiveRun: false, hasActiveSubagentRun: false });
+    harness.focus();
+    await vi.advanceTimersByTimeAsync(0);
+    const portal = document.querySelector(".session-progress-hovercard");
+    const runtime = () => portal?.querySelector(".session-progress-card__runtime")?.textContent;
+    expect(runtime()).toContain(t("sessionProgressCard.runtime.idle"));
+
+    harness.updateRow({ hasActiveSubagentRun: true });
+    expect(runtime()).toContain(t("sessionProgressCard.runtime.delegated"));
+    harness.updateRow({ hasActiveSubagentRun: false });
+    expect(runtime()).toContain(t("sessionProgressCard.runtime.idle"));
+    expect(document.querySelector(".session-progress-hovercard")).toBe(portal);
+  });
 
   it("updates color and machine facts in a held hovercard", async () => {
     vi.useFakeTimers();

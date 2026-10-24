@@ -22,7 +22,12 @@ import {
   type SessionHovercardContextInput,
 } from "./session-hovercard-context.ts";
 import { sessionOwnerInitials, type SessionCreatedActor } from "./session-owner-chip.ts";
-import { progressCardHeadsUp, renderProgressCardMarkdown } from "./session-progress-card.ts";
+import {
+  progressCardHeadsUp,
+  progressCardRunOutcome,
+  renderProgressCardMarkdown,
+  renderSessionProgressRuntime,
+} from "./session-progress-card.ts";
 import "./session-hovercard.css";
 import "./tooltip.ts";
 import "./viewer-facepile.ts";
@@ -58,6 +63,7 @@ type SessionHovercardInput = SessionHovercardContextInput & {
   personActivity?: PersonActivityRouting;
   pullRequests?: ControlUiSessionPullRequestSnapshot;
   progressCard?: ProgressCard | null;
+  connected?: boolean;
 };
 
 let channelAvatarElementLoad: Promise<unknown> | undefined;
@@ -490,7 +496,9 @@ export function renderSessionHovercard(input: SessionHovercardInput) {
     input.progressCard,
     input.row?.status,
     input.row?.startedAt,
-    input.row?.hasActiveRun ?? false,
+    input.connected !== false && input.row?.hasActiveRun === true,
+    input.connected !== false && input.row?.hasActiveSubagentRun === true,
+    input.row?.endedAt,
   );
   const hasPullRequestDetails = Boolean(
     input.pullRequests &&
@@ -517,6 +525,26 @@ export function renderSessionHovercard(input: SessionHovercardInput) {
         ? html`<section class="session-hovercard__section session-hovercard__section--header">
             ${renderHeader(input)}
           </section>`
+        : nothing
+    }
+    ${
+      input.progressCard
+        ? renderSessionProgressRuntime(
+            {
+              hasActiveSubagentRun: input.row?.hasActiveSubagentRun,
+              known: Boolean(input.row),
+              connected: input.connected,
+              lastRunError: input.row?.lastRunError,
+            },
+            input.row?.hasActiveRun ?? false,
+            input.row?.status,
+            progressCardRunOutcome(
+              input.progressCard,
+              input.row?.status,
+              input.row?.startedAt,
+              input.row?.endedAt,
+            ),
+          )
         : nothing
     }
     ${

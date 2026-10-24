@@ -15,6 +15,7 @@ import { clearCompositionEnd } from "../../../lib/ime.ts";
 import { detectTextDirection } from "../../../lib/text-direction.ts";
 import { presentedContent } from "../../../lit/presentation-binding.ts";
 import "../../../styles/chat/composer-context-strip.css";
+import { projectProgressCardRuntime } from "../chat-subagent-wait.ts";
 import type { ComposerDictationController } from "../composer-dictation.ts";
 import { insertComposerDictation } from "../composer-dictation.ts";
 import { renderChatAttachmentInputs } from "./chat-attachment-inputs.ts";
@@ -332,6 +333,10 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
           },
           props.connected && props.canSend ? props.progressCardRefresh : undefined,
           props.onClearSavedProgressCard,
+          {
+            ...projectProgressCardRuntime(activeSession, props, props.progressCard.updatedAt),
+            connected: props.connected,
+          },
         )}
       </div>`
     : props.progressCardInitialLoading

@@ -24,6 +24,7 @@ import type { HumanMentionInput } from "../../../lib/chat/human-mentions.ts";
 import type { ProviderUsageDisplayProps } from "../../../lib/provider-quota-summary.ts";
 import type { SessionToolOverrides } from "../../../lib/sessions/patch.ts";
 import type { PresentationBinding } from "../../../lit/presentation-binding.ts";
+import type { SubagentRoster } from "../chat-spawned-subagent.ts";
 import type { ComposerDictationController } from "../composer-dictation.ts";
 import type { ComposerMicrophonePicker } from "../composer-microphone-picker.ts";
 import type { ChatInputHistoryKeyInput, ChatInputHistoryKeyResult } from "../input-history.ts";
@@ -68,7 +69,7 @@ export type ChatComposerDisabledBanner = {
   disabledReason?: string;
 } & ({ actionLabel: string; onAction: () => void } | { actionLabel?: never; onAction?: never });
 
-export type ChatComposerProps = ChatAttachmentControlsProps & {
+export interface ChatComposerProps extends ChatAttachmentControlsProps, SubagentRoster {
   paneId: string;
   sessionKey: string;
   currentAgentId: string;
@@ -185,7 +186,7 @@ export type ChatComposerProps = ChatAttachmentControlsProps & {
   onGatewayQuestionChange?: () => void;
   onGatewayQuestionSubmit?: (id: string, answers: Record<string, string[]>) => void | Promise<void>;
   onGatewayQuestionSkip?: (id: string) => void | Promise<void>;
-};
+}
 
 type ScopedComposerDraft = {
   key: string;

@@ -111,7 +111,7 @@ describe("renderSessionProgressCard", () => {
     expect(container.querySelector("time")?.textContent).toBe(expected);
   });
 
-  it("uses endedAt for terminal wording and falls back to Updated without it", () => {
+  it("keeps the plan update time when a turn ends with unfinished work", () => {
     const container = createContainer();
     render(
       renderSessionProgressCard(
@@ -124,9 +124,9 @@ describe("renderSessionProgressCard", () => {
       ),
       container,
     );
-    expect(container.querySelector("time")?.textContent).toBe("Completed just now");
+    expect(container.querySelector("time")?.textContent).toBe("Updated 2m ago");
     expect(container.querySelector("time")?.getAttribute("datetime")).toBe(
-      new Date(RUN_ENDED_MS).toISOString(),
+      new Date(progressCard.updatedAt).toISOString(),
     );
 
     render(renderSessionProgressCard(progressCard, "composer", undefined, "done"), container);
@@ -736,7 +736,7 @@ describe("renderSessionProgressCard", () => {
 
   it.each([
     ["running", "2/3"],
-    ["done", "Completed"],
+    ["done", "2/3"],
     ["failed", "Failed"],
     ["timeout", "Failed"],
     ["killed", "Stopped"],
@@ -757,6 +757,62 @@ describe("renderSessionProgressCard", () => {
     expect(
       container.querySelector(".session-progress-card__summary-count--collapsed")?.textContent,
     ).toBe(expected);
+  });
+
+  it("updates delegated activity without changing the saved plan", () => {
+    const container = createContainer();
+    const show = (
+      children: { running: number; queued: number; waiting: number; failed: number },
+      connected = true,
+    ) => {
+      render(
+        renderSessionProgressCard(
+          progressCard,
+          "composer",
+          undefined,
+          "done",
+          RUN_STARTED_MS,
+          RUN_ENDED_MS,
+          false,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          {
+            known: true,
+            connected,
+            hasActiveSubagentRun: children.running + children.queued + children.waiting > 0,
+            children,
+          },
+        ),
+        container,
+      );
+    };
+    show({ running: 2, queued: 3, waiting: 0, failed: 0 });
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "2 running · 3 queued",
+    );
+    expect(container.querySelectorAll(".session-progress-card__step--completed")).toHaveLength(1);
+    expect(container.querySelector(".session-progress-card__step--paused")).toBeNull();
+    expect(container.querySelector('[data-outcome="done"]')).toBeNull();
+    show({ running: 1, queued: 2, waiting: 0, failed: 1 });
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "1 failed",
+    );
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "1 running · 2 queued",
+    );
+    show({ running: 1, queued: 2, waiting: 0, failed: 1 }, false);
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "Connection lost",
+    );
+    expect(container.querySelector(".session-run-spinner")).toBeNull();
+    show({ running: 0, queued: 0, waiting: 0, failed: 0 });
+    expect(container.querySelector(".session-progress-card__runtime")?.textContent).toContain(
+      "No active work",
+    );
+    expect(container.querySelector(".session-progress-card__step--paused")).not.toBeNull();
+    expect(container.querySelector("[data-complete]")?.getAttribute("data-complete")).toBe("false");
   });
 
   it("uses a terminal circle-x instead of pausing after the run stops", () => {

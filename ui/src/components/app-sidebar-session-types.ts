@@ -114,6 +114,8 @@ export type SidebarRecentSession = {
   active: boolean;
   visuallyActive: boolean;
   hasActiveRun: boolean;
+  hasActiveSubagentRun?: boolean;
+  lastRunError?: string;
   /** Raw Gateway liveness used for operations even when display status is terminal. */
   gatewayHasActiveRun?: boolean;
   activeRunIds?: readonly string[];
@@ -210,6 +212,8 @@ export type SidebarSessionHovercardRow = Pick<
   | "endedAt"
   | "hasAutomation"
   | "hasActiveRun"
+  | "hasActiveSubagentRun"
+  | "lastRunError"
   | "label"
   | "lastMessagePreview"
   | "expandedParticipants"

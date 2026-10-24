@@ -171,7 +171,9 @@ Transient refresh failures retain the last loaded card. The dashboard widget sho
 
 The composer and dashboard placements show the local time of the last progress update. The hovercard instead shows the current-or-next plan step and its completed/total count, followed by Markdown in a separate Agent Notepad when a note is present.
 
-Without a matching terminal outcome, unfinished steps appear paused when the Gateway reports no active run or the card predates a later run. The last-update time shows when the agent last revised the card; elapsed time alone does not expire a card belonging to an active run.
+The Control UI also shows current session activity separately from the saved plan. A parent finishing its own turn does not complete unfinished checklist steps. While its delegated work continues, the card remains active. The composer shows separate running, queued, and waiting counts once its own child roster has loaded; previews and dashboard widgets use the parent's delegated-activity flag without inventing counts. The composer identifies child failures and stops that ended after the last saved progress update; older outcomes remain in the child session history. A matching failed parent run can show its error detail. Recoverable tool errors are not treated as failed runs.
+
+Missing activity data and a disconnected Gateway are labeled explicitly. A retained snapshot does not prove that work is still running. Without current activity or a matching terminal outcome, unfinished steps appear paused; a later unrelated run does not revive an older plan. The last-update time shows when the agent last revised the card; elapsed time alone does not expire a card belonging to an active run.
 
 ## Refresh current work status
 
