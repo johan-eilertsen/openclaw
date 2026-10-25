@@ -10,10 +10,7 @@ import {
   listSessionFollowupCompletions,
   readFollowupRequest,
 } from "../subagents/completion/session-followup-completion.js";
-import type {
-  FollowupRequest,
-  FollowupCompletionOwner,
-} from "../subagents/completion/session-followup-completion.types.js";
+import type { FollowupRequest } from "../subagents/completion/session-followup-completion.types.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
 import { prepareSessionsSendFollowup } from "./sessions-send-followup-custody.js";
 import {
@@ -115,6 +112,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const request of active.splice(0)) {
+    request.completion?.close();
     request.custody.release();
   }
   vi.clearAllMocks();
@@ -288,34 +286,11 @@ describe("followup retained session authorization", () => {
 
   it("retains exact requester incarnation and route when an accepted start loses its ACK", async () => {
     const request = await prepare();
-    const unexpected = () => {
-      throw new Error("Unexpected completion operation during ACK reconciliation");
-    };
-    const close = vi.fn();
-    const completion: FollowupCompletionOwner = {
-      request,
-      signal: new AbortController().signal,
-      accepted: true,
-      progress: { phase: "waiting", runId: input.runId },
-      subscribe: unexpected,
-      failProgress: unexpected,
-      withRequesterRun: unexpected,
-      assertCurrent: unexpected,
-      markAccepted: unexpected,
-      finishExecution: unexpected,
-      ownsExecution: unexpected,
-      assertExecutionCurrent: unexpected,
-      promoteYield: unexpected,
-      successor: unexpected,
-      prepareSuccessor: unexpected,
-      adopt: unexpected,
-      settle: unexpected,
-      take: unexpected,
-      replaceCohortEntry: unexpected,
-      close,
-    };
+    const completion = SessionFollowupCompletion.bind(request);
+    const close = vi.spyOn(completion, "close");
     const callGateway = vi.fn(async () => {
       expect(readFollowupRequest(input.runId, input.targetSessionKey)).toBe(request);
+      completion.markAccepted(input.runId);
       request.completion = completion;
       throw new Error("accepted but transport ACK lost");
     });
@@ -375,6 +350,8 @@ describe("followup retained session authorization", () => {
       }),
     );
     expect(close).not.toHaveBeenCalled();
+    expect(completion.accepted).toBe(true);
+    completion.assertExecutionCurrent(input.runId);
   });
 
   it.each(["access", "archive"] as const)(
