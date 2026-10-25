@@ -132,9 +132,10 @@ async function readJournalPlans(
     turn: new URL("../../node-host/node-worker-turn-store.kernel.ts", import.meta.url).href,
     connection: new URL("../sql-connection.ts", import.meta.url).href,
   };
+  // The eval worker inherits the host pool instead of self-rooting four I/O services.
+  const postgresPool = createPostgresPoolEndpoints();
   let worker: Worker;
   try {
-    const postgresPool = createPostgresPoolEndpoints();
     worker = new Worker(
       `
     const { parentPort, workerData } = require("node:worker_threads");
@@ -204,13 +205,14 @@ async function readJournalPlans(
           supervisor: requireNodeWorkerProcessIdentity(process.pid),
           stateContext: captureSqliteWorkerStateContext(context),
           admissions: captureSqliteDatabaseAdmissions(),
-          port: admission.port,
           postgresPool,
+          port: admission.port,
         },
         transferList: [admission.port, ...postgresPoolTransferList(postgresPool)],
       },
     );
   } catch (error) {
+    postgresPoolTransferList(postgresPool).forEach((port) => port.close());
     admission.finish();
     throw error;
   }
