@@ -11,19 +11,22 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { chromium, type CDPSession, type Page } from "playwright";
 import { buildSandboxHostPath } from "../src/agents/sandbox-host.ts";
 import { createControlUiE2eArtifactDir } from "../ui/src/test-helpers/control-ui-e2e-artifacts.ts";
+import { waitForControlUiInitialRoster } from "../ui/src/test-helpers/control-ui-e2e-readiness.ts";
 import {
   controlUiBundledGatewayUrl,
   controlUiBundledSettingsStorageKey,
   installMockGateway,
   resolvePlaywrightChromiumExecutablePath,
-  startBuiltControlUiE2eServer,
 } from "../ui/src/test-helpers/control-ui-e2e.ts";
+import type { ProjectionFixtureFacts } from "../ui/src/test-helpers/control-ui-projection-fixture-contract.ts";
 import { createControlUiSandboxFixtureServer } from "../ui/src/test-helpers/control-ui-sandbox-fixture-server.ts";
 import { createTeamScaleSidebarListOwner } from "../ui/src/test-helpers/control-ui-sidebar-list-fixture.ts";
+import { startControlUiBenchGatewayServer } from "./lib/control-ui-bench-gateway-server.ts";
 import { mapColdLoadCpuProfile, summarizeCpuProfile } from "./lib/control-ui-cold-load-trace.ts";
 import {
   createInteractionFixture,
   interactionScenarios,
+  settleSidebarBackgroundWork,
   type InteractionEvidence,
   type InteractionSandbox,
 } from "./lib/control-ui-interaction-scenarios.ts";
@@ -34,6 +37,12 @@ import {
   summarizeLongTaskCpuProfiles,
   type InteractionStyleSheet,
 } from "./lib/control-ui-interaction-trace.ts";
+import {
+  createProjectionBoardResponses,
+  disposeProjectionFixture,
+  finishProjectionFixture,
+  prepareProjectionFixture,
+} from "./lib/control-ui-projection-fixtures.ts";
 import {
   installControlUiResourceCounts,
   readControlUiResourceCounts,
@@ -48,6 +57,7 @@ const { values } = parseArgs({
     steps: { type: "string" },
     viewport: { type: "string", default: "both" },
     pairs: { type: "string", default: "1" },
+    "cpu-throttle": { type: "string", default: "1" },
     trace: { type: "boolean", default: false },
     "selector-stats": { type: "boolean", default: false },
     theme: { type: "string", default: "light" },
@@ -56,15 +66,30 @@ const { values } = parseArgs({
     "invalidation-tracking": { type: "boolean", default: false },
     "resource-counts": { type: "boolean", default: false },
     "process-wakeups": { type: "boolean", default: false },
+    "projection-fixtures": { type: "boolean", default: false },
+    "projection-counts": { type: "boolean", default: false },
     headed: { type: "boolean", default: false },
   },
 });
 const trace = values.trace || values["selector-stats"];
+if (values["projection-counts"] && !values["projection-fixtures"]) {
+  throw new Error("--projection-counts requires --projection-fixtures");
+}
+if (values["projection-counts"] && trace) {
+  throw new Error("Run precise projection counts separately from CPU profiles/traces");
+}
+if (values["projection-fixtures"] && values["resource-counts"]) {
+  throw new Error("Run native resource counts separately from projection fixture measurements");
+}
 if (values.theme !== "light" && values.theme !== "dark") {
   throw new Error("theme must be light or dark");
 }
 const theme = values.theme;
 const pairs = Number(values.pairs);
+const cpuThrottle = Number(values["cpu-throttle"]);
+if (!Number.isFinite(cpuThrottle) || cpuThrottle < 1) {
+  throw new Error("cpu-throttle must be at least 1");
+}
 if (!Number.isInteger(pairs) || pairs < 1) {
   throw new Error("pairs must be a positive integer");
 }
@@ -72,9 +97,14 @@ if (!["desktop", "mobile", "both"].includes(values.viewport)) {
   throw new Error("viewport must be desktop, mobile or both");
 }
 const selectedIds = values.steps?.split(",");
-const scenarios = interactionScenarios.filter((step) =>
-  selectedIds ? selectedIds.includes(step.id) : !step.resourceOnly || values["resource-counts"],
-);
+const scenarios = interactionScenarios.filter((step) => {
+  if (Boolean(step.projectionFamily) !== values["projection-fixtures"]) {
+    return false;
+  }
+  return selectedIds
+    ? selectedIds.includes(step.id)
+    : !step.resourceOnly || values["resource-counts"];
+});
 if (!scenarios.length || selectedIds?.some((id) => !scenarios.some((step) => step.id === id))) {
   throw new Error("Unknown or empty interaction steps");
 }
@@ -240,6 +270,8 @@ type Result = {
   taskMs?: number;
   layoutMs?: number;
   styleMs?: number;
+  durationBreakdownMs?: Record<string, number>;
+  longTasks?: { count: number; totalMs: number; maxMs: number };
   requests?: Record<string, number>;
   scenarioEvidence?: InteractionEvidence;
   domBefore?: { nodes: number; menuItems: number; namedAnchors: number };
@@ -248,6 +280,10 @@ type Result = {
   resourcesBefore?: ControlUiResourceCounts;
   resourcesAfter?: ControlUiResourceCounts;
   processWakeups?: ProcessWakeups;
+  projectionFixture?: ProjectionFixtureFacts;
+  projectionCoverageArtifact?: string;
+  projectionScreenshotArtifact?: string;
+  measurementClass?: "production-interaction" | "projection-counter" | "projection-cpu";
   skipReason?: string;
   trace?: ReturnType<typeof summarizeInteractionTrace>;
   longTaskDetails?: ReturnType<typeof summarizeLongTaskCpuProfiles>;
@@ -269,7 +305,8 @@ const servers: Array<{
   directory: string;
   build: { buildId: string; version: string };
   indexSha256: string;
-  server: Awaited<ReturnType<typeof startBuiltControlUiE2eServer>>;
+  projectionBuild?: { entry: string; descriptorSha256: string; entrySha256: string };
+  server: Awaited<ReturnType<typeof startControlUiBenchGatewayServer>>;
 }> = [];
 let processWakeupReader: string | undefined;
 let processWakeupSetupError: string | undefined;
@@ -317,19 +354,33 @@ async function launchNativeVisibilityContext() {
     ],
     { stdio: ["ignore", "ignore", "pipe"] },
   );
-  const stopped = new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
+  const stopped = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
   });
+  let terminationRequested = false;
   let nativeBrowser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | undefined;
   const close = async () => {
     try {
       await nativeBrowser?.close();
     } finally {
       if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGTERM");
+        terminationRequested = child.kill("SIGTERM");
         await stopped;
       }
       await rm(profile, { recursive: true, force: true });
+    }
+    if (child.pid !== undefined) {
+      const exit = await stopped;
+      await writeFile(
+        path.join(artifactDir, `native-browser-${child.pid}.process.json`),
+        JSON.stringify({ pid: child.pid, ...exit, terminationRequested }, null, 2),
+      );
+      if (
+        !(exit.code === 0 && exit.signal === null) &&
+        !(terminationRequested && exit.signal === "SIGTERM")
+      ) {
+        throw new Error(`Native visibility Chromium exited with ${exit.code}/${exit.signal}`);
+      }
     }
   };
   try {
@@ -404,11 +455,31 @@ try {
       throw new Error(`Missing build identity: ${directory}`);
     }
     const build: { buildId: string; version: string } = JSON.parse(raw);
+    let projectionBuild: (typeof servers)[number]["projectionBuild"];
+    if (values["projection-fixtures"]) {
+      const descriptor = await readFile(path.join(resolved, "projection-fixture.json"), "utf8");
+      const parsed: unknown = JSON.parse(descriptor);
+      if (
+        !isRecord(parsed) ||
+        parsed.benchmarkOnly !== true ||
+        typeof parsed.entry !== "string" ||
+        !parsed.entry.startsWith("assets/")
+      ) {
+        throw new Error(`Missing benchmark-only projection build: ${directory}`);
+      }
+      const entry = await readFile(path.join(resolved, parsed.entry));
+      projectionBuild = {
+        entry: parsed.entry,
+        descriptorSha256: createHash("sha256").update(descriptor).digest("hex"),
+        entrySha256: createHash("sha256").update(entry).digest("hex"),
+      };
+    }
     servers.push({
       directory: resolved,
       build,
       indexSha256: createHash("sha256").update(html).digest("hex"),
-      server: await startBuiltControlUiE2eServer(resolved),
+      projectionBuild,
+      server: await startControlUiBenchGatewayServer(resolved),
     });
   }
   await writeFile(
@@ -427,6 +498,8 @@ try {
           ? "CDP trace + 1ms CPU profiler (overhead included)"
           : "untraced CDP metrics",
         metricTimeDomain: values["thread-cpu-time"] ? "threadTicks" : "timeTicks",
+        cpuThrottle,
+        mobileTouchEmulation: true,
         screenshots: values["first-pair-screenshots"] ? "first pair per cell" : "all",
         resourceCounts: values["resource-counts"]
           ? "Instrumented top-frame native registrations, including fixture resources; measure timings separately without this flag."
@@ -453,6 +526,21 @@ try {
         selectorStats: values["selector-stats"],
         theme,
         fixture: { sessions: 1000, messagesPerSession: 400, models: 1000, cronJobs: 500 },
+        projectionBenchmark: values["projection-fixtures"]
+          ? {
+              instrumented: values["projection-counts"],
+              shippingBundleProof: false,
+              mountedPerFamily: {
+                "agent-rows": { A: 400, B: 80 },
+                outbox: { A: 400, B: 80 },
+                "board-pins": { A: 400, B: 80 },
+                "sdk-avatars": { A: 120, B: 40 },
+                "sdk-avatar-identities": { A: 120, B: 40 },
+              },
+              publications: 20,
+              note: "Extra benchmark-only entry changes the build graph; compare identical entry builds and measure shipping bytes separately.",
+            }
+          : undefined,
         acceptance:
           "For fixed steps: >=10 serial AB pairs per viewport, all median/p95/min/max cells reviewed; any >20% regression stops landing. No boot growth beyond 64 B.",
         exclusions: [
@@ -467,10 +555,11 @@ try {
           fixture,
         })),
         viewports,
-        bundles: servers.map(({ directory, build, indexSha256 }) => ({
+        bundles: servers.map(({ directory, build, indexSha256, projectionBuild }) => ({
           directory,
           ...build,
           indexSha256,
+          projectionBuild,
         })),
       },
       null,
@@ -491,6 +580,8 @@ try {
             nativeVisibility?.context ??
             (await browser.newContext({
               viewport: { width: viewport.width, height: viewport.height },
+              isMobile: viewport.name === "mobile",
+              hasTouch: viewport.name === "mobile",
               serviceWorkers: "block",
               colorScheme: theme,
             }));
@@ -509,7 +600,7 @@ try {
               await page.emulateMedia({ colorScheme: theme });
               await page.bringToFront();
             }
-            page.setDefaultTimeout(15_000);
+            page.setDefaultTimeout(15_000 * cpuThrottle);
             // tsx preserves names in serialized fixture callbacks, as in the cold-load runner.
             await page.addInitScript("globalThis.__name = (fn) => fn");
             await page.addInitScript(() => performance.setResourceTimingBufferSize(2048));
@@ -558,13 +649,15 @@ try {
           let processSession: CDPSession | undefined;
           let tracing = false;
           let profiling = false;
+          let preciseCoverage = false;
           let minimizedWindow: number | undefined;
           const events: unknown[] = [];
           const styleSheets = new Map<string, InteractionStyleSheet>();
           try {
+            cdp = await context.newCDPSession(page);
+            await cdp.send("Emulation.setCPUThrottlingRate", { rate: cpuThrottle });
             if (nativeVisibility && scenario.fixture?.boardFrameResources) {
               // Native default contexts allow service workers, which hide fixture fetches from page.route.
-              cdp = await context.newCDPSession(page);
               await cdp.send("Network.enable");
               await cdp.send("Network.setBypassServiceWorker", { bypass: true });
             }
@@ -581,23 +674,56 @@ try {
               defaults: { model: "model-0", modelProvider: "example", contextTokens: 128_000 },
               owners: [],
             });
-            const gateway = await installMockGateway(page, fixture, {
-              requestHandlers: {
-                "sessions.list": (params) => {
-                  if (!isRecord(params)) {
-                    throw new Error("Expected sessions.list query parameters");
-                  }
-                  return sessions.list(params).result;
+            const boardResponse = createProjectionBoardResponses();
+            // Keep the same readiness contract with a timeout scaled for intentional throttling.
+            const gateway = await installMockGateway(
+              page,
+              { ...fixture, awaitInitialRoster: false },
+              {
+                requestHandlers: {
+                  ...(scenario.projectionFamily
+                    ? {
+                        "board.get": (params: unknown) => {
+                          if (!isRecord(params)) {
+                            throw new Error("Expected board.get parameters");
+                          }
+                          return boardResponse(params);
+                        },
+                      }
+                    : {}),
+                  "sessions.list": (params) => {
+                    if (!isRecord(params)) {
+                      throw new Error("Expected sessions.list query parameters");
+                    }
+                    return sessions.list(params).result;
+                  },
                 },
               },
-            });
+            );
             await scenario.setup?.(page);
             await page.goto(new URL(scenario.route, slot.server.baseUrl).href);
+            await waitForControlUiInitialRoster(page, 15_000 * cpuThrottle);
             await scenario.prepare(page, gateway);
-            if (cdp) {
+            if (nativeVisibility && scenario.fixture?.boardFrameResources) {
               await cdp.send("Network.setBypassServiceWorker", { bypass: false });
               await cdp.send("Network.disable");
             }
+            result.measurementClass = scenario.projectionFamily
+              ? values["projection-counts"]
+                ? "projection-counter"
+                : "projection-cpu"
+              : "production-interaction";
+            if (scenario.projectionFamily) {
+              result.projectionFixture = await prepareProjectionFixture(
+                page,
+                scenario.projectionFamily,
+                values["projection-counts"],
+              );
+              await page.waitForFunction(() => window.openclawControlUi !== undefined);
+              await settleSidebarBackgroundWork(page);
+            }
+            // Slow CPUs can still be loading boot modules after the first ready frame.
+            await page.waitForLoadState("networkidle");
             await page.evaluate(() => document.fonts.ready.then(() => undefined));
             await settle(page);
             const activePet = await page.evaluate(
@@ -607,7 +733,6 @@ try {
               throw new Error("Warm interaction fixture must disable unrelated pet visits");
             }
             await page.locator(`html[data-theme-mode="${theme}"]`).waitFor({ state: "attached" });
-            cdp ??= await context.newCDPSession(page);
             await cdp.send("Performance.enable", {
               timeDomain: values["thread-cpu-time"] ? "threadTicks" : "timeTicks",
             });
@@ -739,7 +864,20 @@ try {
                 }
               }
             }
+            const taskProbe = await page.evaluateHandle(() => {
+              const durations: number[] = [];
+              const observer = new PerformanceObserver((list) => {
+                durations.push(...list.getEntries().map((entry) => entry.duration));
+              });
+              observer.observe({ type: "longtask" });
+              return { durations, observer };
+            });
             const before = await metrics(cdp);
+            if (scenario.projectionFamily && values["projection-counts"]) {
+              await cdp.send("Profiler.enable");
+              await cdp.send("Profiler.startPreciseCoverage", { callCount: true, detailed: true });
+              preciseCoverage = true;
+            }
             await page.evaluate(() => performance.mark("interaction:start"));
             const start = performance.now();
             result.scenarioEvidence = (await scenario.run(page, gateway)) ?? undefined;
@@ -748,7 +886,25 @@ try {
             }
             result.wallMs = performance.now() - start;
             await page.evaluate(() => performance.mark("interaction:end"));
+            if (preciseCoverage) {
+              const coverage = await cdp.send("Profiler.takePreciseCoverage");
+              await cdp.send("Profiler.stopPreciseCoverage");
+              preciseCoverage = false;
+              const artifact = `${artifactPrefix}.projection-coverage.json`;
+              await writeFile(path.join(artifactDir, artifact), JSON.stringify(coverage));
+              result.projectionCoverageArtifact = artifact;
+            }
             const after = await metrics(cdp);
+            result.longTasks = await taskProbe.evaluate(({ durations, observer }) => {
+              durations.push(...observer.takeRecords().map((entry) => entry.duration));
+              observer.disconnect();
+              return {
+                count: durations.length,
+                totalMs: durations.reduce((sum, duration) => sum + duration, 0),
+                maxMs: Math.max(0, ...durations),
+              };
+            });
+            await taskProbe.dispose();
             if (processSession && processWakeupReader && result.processWakeups?.before) {
               try {
                 result.processWakeups.after = await readProcessWakeups(
@@ -761,7 +917,24 @@ try {
                 result.processWakeups.reason = String(error);
               }
             }
+            const requestsAfter = (await gateway.getRequests()).slice(requestsBefore);
             result.domAfter = await countDom();
+            if (scenario.projectionFamily) {
+              if (minimizedWindow !== undefined) {
+                await cdp.send("Browser.setWindowBounds", {
+                  windowId: minimizedWindow,
+                  bounds: { windowState: "normal" },
+                });
+                minimizedWindow = undefined;
+                await page.waitForFunction(() => document.visibilityState === "visible");
+              }
+              if (pair === 0 && !scenario.projectionIdle) {
+                const artifact = `${artifactPrefix}.projection-mounted.png`;
+                await page.screenshot({ path: path.join(artifactDir, artifact) });
+                result.projectionScreenshotArtifact = artifact;
+              }
+              result.projectionFixture = await finishProjectionFixture(page);
+            }
             if (rowProbe && scenario.rowSelector) {
               result.rowIdentity = await rowProbe.evaluate(({ state, observer }, selector) => {
                 observer.disconnect();
@@ -789,9 +962,31 @@ try {
               }
               result[key] = (after[name] - before[name]) * 1000;
             }
+            result.durationBreakdownMs = Object.fromEntries(
+              Object.entries(after)
+                .filter(([name]) => name.endsWith("Duration"))
+                .map(([name, value]) => [name, (value - before[name]!) * 1000]),
+            );
             result.requests = {};
-            for (const request of (await gateway.getRequests()).slice(requestsBefore)) {
+            for (const request of requestsAfter) {
               result.requests[request.method] = (result.requests[request.method] ?? 0) + 1;
+            }
+            if (scenario.projectionFamily) {
+              const sdk =
+                scenario.projectionFamily === "sdk-avatars" ||
+                scenario.projectionFamily === "sdk-avatar-identities";
+              const method =
+                scenario.projectionFamily === "board-pins"
+                  ? "board.get"
+                  : scenario.projectionFamily === "sdk-avatar-identities"
+                    ? "agent.identity.get"
+                    : "agents.list";
+              const expected = scenario.projectionIdle ? 0 : sdk ? 10 : 20;
+              if ((result.requests[method] ?? 0) !== expected) {
+                throw new Error(
+                  `Expected ${expected} measured ${method} requests, got ${result.requests[method] ?? 0}`,
+                );
+              }
             }
             if (errors.length) {
               throw new Error(errors.join("\n"));
@@ -815,6 +1010,9 @@ try {
               }
             };
             try {
+              if (preciseCoverage && cdp) {
+                await capture(() => cdp!.send("Profiler.stopPreciseCoverage"));
+              }
               if (minimizedWindow !== undefined && cdp) {
                 const windowId = minimizedWindow;
                 await capture(() =>
@@ -924,6 +1122,9 @@ try {
                   }
                 }
               }
+              if (scenario.projectionFamily) {
+                await capture(() => disposeProjectionFixture(page));
+              }
               await capture(async () => cdp?.detach());
               await capture(() => (nativeVisibility ? nativeVisibility.close() : context.close()));
             }
@@ -1020,7 +1221,9 @@ const summary = viewports
           metrics: Object.fromEntries(
             (["wallMs", "scriptMs", "taskMs", "layoutMs", "styleMs"] as const).map((metric) => [
               metric,
-              samples.length ? distribution(samples.map((row) => row[metric]!)) : null,
+              samples.length && !values["projection-counts"]
+                ? distribution(samples.map((row) => row[metric]!))
+                : null,
             ]),
           ),
         };

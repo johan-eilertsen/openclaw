@@ -10,9 +10,16 @@ import { runtimeProcessBuildEntries } from "../scripts/lib/runtime-process-build
 import { readUpdateCompatibilityInventory } from "../scripts/lib/update-compat-chunks.mts";
 import { ModuleGraph } from "../scripts/lib/update-compat-module-graph.mts";
 import { buildPackageDistEntriesFromExports } from "../scripts/lib/workspace-package-entries.mts";
+import {
+  runtimeProcessScriptEntrypoints,
+  runtimeProcessToolingEntrypoints,
+} from "../src/infra/runtime-process-manifest.ts";
 import { controlUiSource } from "../src/plugins/package-manifest.js";
 import aiBuildConfig from "../tsdown.ai.config.ts";
-import { compileDynamicConsumerEdges } from "./knip-dynamic-consumers.mjs";
+import {
+  collectRuntimeProcessManifestEntries,
+  compileDynamicConsumerEdges,
+} from "./knip-dynamic-consumers.mjs";
 import { compileViteConfigConsumers } from "./knip-vite-consumers.mjs";
 
 const BUNDLED_PLUGIN_ROOT_DIR = "extensions";
@@ -116,9 +123,11 @@ const repositoryScriptEntries = [
   // Maintained guides, source headers, and paired drivers invoke these roots by path.
   "scripts/perf/node-worker-journal-measure.ts!",
   "scripts/perf/orphan-recovery-observer.mjs!",
+  "scripts/perf/pairing-channel-attribution.mts!",
   "scripts/perf/session-actor-residency-snapshot.mjs!",
   "scripts/perf/session-actor-retention-seed.ts!",
   "scripts/perf/session-row-materialization-measure.ts!",
+  "scripts/perf/tool-result-hash-measure.ts!",
   "scripts/perf/ws-counter-stress-preload.ts!",
   "scripts/perf/ws-counter-stress.ts!",
   // The source header documents this GitHub reader benchmark's Node command.
@@ -140,6 +149,15 @@ const repositoryScriptEntries = [
   "scripts/perf/diagnostic-profile-measure.ts!",
   "scripts/perf/owned-directory-events-measure.ts!",
   "scripts/perf/plugin-gateway-scope-measure.ts!",
+  // pg-footprint.md and the pool proof commands execute these entries by path.
+  "scripts/perf/pg-footprint.ts!",
+  "scripts/perf/pg-footprint-preload.mjs!",
+  "scripts/perf/pg-footprint-topology.mjs!",
+  "scripts/perf/pg-pool-lifecycle.mts!",
+  "scripts/perf/pg-pool-topology.mts!",
+  // The lifecycle proof passes these fixture entries through computed worker URLs.
+  "scripts/perf/pg-pool-broker.fixture.mts!",
+  "scripts/perf/pg-pool-hang.worker.mjs!",
   // #181150 invokes this reproducible session-row owner probe by path.
   "scripts/perf/session-actor-row-facts-measure.ts!",
   "scripts/perf/session-catalog-selection-measure.ts!",
@@ -322,6 +340,23 @@ const repositoryScriptEntries = [
   "scripts/perf/trajectory-preparation-retention.ts!",
   "scripts/perf/transcript-session-list-measure.ts!",
   "scripts/perf/transport-pull-allocation-measure.mjs!",
+  // Source headers and maintained benchmark contributions invoke these workloads by exact path.
+  "scripts/bench-binding-mismatch.mts!",
+  "scripts/bench-cron-run.mts!",
+  "scripts/bench-delivery-recovery.mts!",
+  "scripts/bench-reload-lease.mts!",
+  "scripts/bench-team-reports-snapshots.mts!",
+  "scripts/perf/async-work-scope-measure.ts!",
+  "scripts/perf/local-workspace-callers-measure.ts!",
+  "scripts/perf/placement-startup-wake-measure.ts!",
+  "scripts/perf/response-decode-measure.mts!",
+  "scripts/perf/text-projection-append-measure.ts!",
+  "scripts/perf/text-projection-rope-measure.mjs!",
+  "scripts/perf/trajectory-persistence.ts!",
+  // The maintained drivers spawn or preload these children through exact computed paths.
+  "scripts/perf/delivery-recovery-fixture.ts!",
+  "scripts/perf/team-reports-snapshots-preload.mjs!",
+  "scripts/perf/trajectory-flush-preload.mts!",
   // scripts/perf/README.md invokes this lazy-import probe and its preload by path.
   "scripts/perf/lazy-import-feature-probe.mjs!",
   "scripts/perf/lazy-import-trace-preload.mjs!",
@@ -733,6 +768,11 @@ const rootEntries = [
     ...Object.values(runtimeProcessBuildEntries),
     ...createManagedHandoffBuildConfigs().flatMap(({ entry }) => Object.values(entry)),
   ].map((source) => `${path.relative(".", source).replaceAll("\\", "/")}!`),
+  // The runtime manifest also declares generated script sources/outputs and source-only tooling.
+  ...collectRuntimeProcessManifestEntries(
+    runtimeProcessScriptEntrypoints,
+    runtimeProcessToolingEntrypoints,
+  ).map((source) => `${source}!`),
   // Knip loads these audit configurations directly by command-line path.
   "config/knip.config.ts!",
   "config/knip.all-exports.config.ts!",
@@ -980,7 +1020,7 @@ function workspacePackage(packageDir: string, extraEntries: readonly string[] = 
 
 function compileDynamicMjsConsumers(source: string, filePath: string): string {
   if (path.resolve(filePath) === path.resolve("config/knip-dynamic-consumers.mjs")) {
-    return compileDynamicConsumerEdges(source, filePath);
+    return compileDynamicConsumerEdges(source, filePath, runtimeProcessScriptEntrypoints);
   }
   // A custom TS compiler disables Knip's declaration-to-source mapping.
   if (path.resolve(filePath) === path.resolve("config/knip-vite-consumers.mjs")) {
