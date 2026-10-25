@@ -183,7 +183,6 @@ describe("followup retained session authorization", () => {
           message: "followup",
           ownChild: false,
           nativeChild: true,
-          claimRequesterTurnCompletion: false,
           watch: false,
           requesterSessionKey: input.requesterSessionKey,
           requesterAgentId: "main",
