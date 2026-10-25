@@ -9,6 +9,7 @@ import {
 import type { ReplyExpectation } from "../reply-completion.js";
 import { withFollowupRequest } from "../subagents/completion/session-followup-completion.js";
 import type { FollowupRequest } from "../subagents/completion/session-followup-completion.types.js";
+import { subagentRuns } from "../subagents/registry/subagent-registry-memory.js";
 import { getLatestLiveSubagentRunByChildSessionKey } from "../subagents/registry/subagent-registry-read.js";
 import {
   captureGatewayToolCallerAssertion,
@@ -82,8 +83,8 @@ export async function dispatchSessionsSendFollowup(
   options: {
     message: string;
     ownChild: boolean;
+    persistentChildAccess?: boolean;
     nativeChild: boolean;
-    claimRequesterTurnCompletion: boolean;
     watch: boolean;
     requesterSessionKey: string;
     requesterAgentId: string;
@@ -103,11 +104,10 @@ export async function dispatchSessionsSendFollowup(
       )
     : undefined;
   const sameRequester = replyContext.requesterSessionKey === options.requesterSessionKey;
+  const isCronRequester = isCronRunSessionKey(options.requesterSessionKey);
   const requesterTurn =
-    options.claimRequesterTurnCompletion &&
-    !params.expectedSessionId &&
+    (!params.expectedSessionId || options.persistentChildAccess) &&
     options.nativeChild &&
-    !isCronRunSessionKey(options.requesterSessionKey) &&
     sameRequester &&
     (options.ownChild ||
       (completionChild?.requesterSessionKey === options.requesterSessionKey &&
@@ -119,8 +119,11 @@ export async function dispatchSessionsSendFollowup(
     throw new Error("Child followup completion requires its original requester session.");
   }
   const active = await trySessionsSendActiveRunDelivery(params, options.ownChild);
-  const completionTurn =
-    options.watch || (options.ownChild && !("ok" in active)) ? requesterTurn : undefined;
+  const registryTurn =
+    (!isCronRequester && options.watch) || (options.ownChild && !("ok" in active))
+      ? requesterTurn
+      : undefined;
+  const completionTurn = isCronRequester ? undefined : registryTurn;
   const visiblePeerReply = Boolean(
     replyContext.replyMode === "peer" &&
     options.requesterReplyExpectation === "required" &&
@@ -138,7 +141,7 @@ export async function dispatchSessionsSendFollowup(
   );
   const request =
     !("ok" in active) &&
-    (completionTurn ||
+    (registryTurn ||
       visiblePeerReply ||
       (replyContext.replyMode === "one-way" && options.ownChild)) &&
     sameRequester
@@ -162,11 +165,11 @@ export async function dispatchSessionsSendFollowup(
     "ok" in active
       ? { start: active, completion: undefined }
       : await startSessionsSendFollowup(
-          completionTurn ? undefined : request,
+          registryTurn ? undefined : request,
           {
             ...params,
             ...active,
-            ...(completionTurn
+            ...(registryTurn
               ? {
                   retainAcceptance: true,
                   assertDispatchCurrent: () => {
@@ -182,7 +185,7 @@ export async function dispatchSessionsSendFollowup(
           replyContext,
         );
   try {
-    if (start.ok && completionTurn) {
+    if (start.ok && registryTurn) {
       const { registerSubagentRun, adoptSubagentRunForRequesterTurn } =
         await import("../subagents/registry/subagent-registry.js");
       // Acceptance already owns the input; retained custody owns recording its result obligation.
@@ -205,7 +208,7 @@ export async function dispatchSessionsSendFollowup(
               expected,
               requesterSessionKey: options.requesterSessionKey,
               requesterAgentId: options.requesterAgentId,
-              requesterTurnRunId: completionTurn,
+              requesterTurnRunId: registryTurn,
               assertCurrent: assertCompletionCurrent,
             });
           }
@@ -224,13 +227,13 @@ export async function dispatchSessionsSendFollowup(
               requesterSessionKey: options.requesterSessionKey,
               requesterDisplayKey: options.requesterSessionKey,
               requesterAgentId: options.requesterAgentId,
-              requesterTurnRunId: completionTurn,
+              requesterTurnRunId: registryTurn,
               requesterOrigin: replyContext.requesterOrigin,
               task: options.message,
               cleanup: "keep",
               spawnMode: "session",
-              expectsCompletionMessage: true,
-              completionTarget: "parent",
+              expectsCompletionMessage: Boolean(completionTurn),
+              completionTarget: completionTurn ? "parent" : undefined,
               completionRequesterSessionId: replyContext.requesterSession?.sessionId,
               completionRequesterLifecycleRevision:
                 replyContext.requesterSession?.lifecycleRevision,
@@ -241,7 +244,19 @@ export async function dispatchSessionsSendFollowup(
               acceptedRunReplay: true,
             },
           );
-          accepted = { runId: start.runId, childSessionKey, expectsCompletionMessage: true };
+          accepted = {
+            runId: start.runId,
+            childSessionKey,
+            expectsCompletionMessage: Boolean(completionTurn),
+          };
+        }
+        if (completionTurn && request?.requesterAuthority) {
+          const runId = start.targetDisposition === "steered" ? start.steeredRunId : start.runId;
+          const entry = runId ? subagentRuns.get(runId) : undefined;
+          if (!entry) {
+            throw new Error("Accepted child followup has no registry owner.");
+          }
+          request.requesterAuthority.bind({ entry, runs: subagentRuns });
         }
         return accepted;
       };
@@ -292,7 +307,7 @@ export async function dispatchSessionsSendFollowup(
     };
   } finally {
     admissionOpen = false;
-    if (completionTurn) {
+    if (registryTurn) {
       request?.custody.release();
     }
   }
@@ -303,7 +318,7 @@ export async function dispatchSessionsSendFollowup(
   if (
     start.ok &&
     options.watch &&
-    !params.expectedSessionId &&
+    (!params.expectedSessionId || options.persistentChildAccess) &&
     replyContext.requesterSessionKey &&
     targetSessionKey &&
     replyContext.requesterSessionKey !== targetSessionKey

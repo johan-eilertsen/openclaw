@@ -71,8 +71,8 @@ describe("pruneStaleEntries", () => {
 });
 
 it.each([
-  ["suspended", "quota_exhausted", 30_000, 1, false],
-  ["active", "circuit_open", 61_000, 31_000, true],
+  ["suspended", "quota_exhausted", 30 * 60 * 1000, 1, false],
+  ["active", "circuit_open", 61 * 60 * 1000, 31 * 60 * 1000, true],
 ] as const)("transitions a %s quota suspension (%s)", (state, reason, age, resumeAge, cleared) => {
   const now = Date.now();
   const quotaSuspension = {
@@ -84,17 +84,12 @@ it.each([
     failedProvider: "anthropic",
     failedModel: "claude-opus-4-6",
   };
-  const expected = {
-    patch: { quotaSuspension: cleared ? undefined : { ...quotaSuspension, state: "resuming" } },
-    cleared,
-  };
   expect(
     resolveQuotaSuspensionEntryMaintenance({
-      entry: { ...makeEntry(now), quotaSuspension },
+      entry: makeEntry(now, undefined, { quotaSuspension }),
       now,
-      ttlMs: 30_000,
     }),
-  ).toEqual(expected);
+  ).toEqual({ quotaSuspension: cleared ? undefined : { ...quotaSuspension, state: "resuming" } });
 });
 
 describe("applyFileBackedSessionStoreMaintenance", () => {
@@ -132,8 +127,8 @@ describe("applyFileBackedSessionStoreMaintenance", () => {
   it("reports archive retention failure without aborting file-backed maintenance", async () => {
     const now = Date.now();
     const store = makeStore([
-      ["agent:main:hook:stale", { sessionId: "stale-session", updatedAt: now - 30 * DAY_MS }],
-      ["fresh", { sessionId: "fresh-session", updatedAt: now }],
+      ["agent:main:hook:stale", makeEntry(now - 30 * DAY_MS, "stale-session")],
+      ["fresh", makeEntry(now, "fresh-session")],
     ]);
     const cleanupError = new Error("archive cleanup denied");
     const warn = vi.fn();
@@ -194,9 +189,9 @@ describe("applyFileBackedSessionStoreMaintenance", () => {
     const storePath = "/tmp/openclaw-sessions/active-cloud-placement.json";
     const key = "agent:main:explicit:cloud-owned";
     const store = makeStore([
-      [key, { sessionId: "cloud-placement-session", updatedAt: now - 2 }],
-      ["removable-old", { sessionId: "removable-old-session", updatedAt: now - 2 }],
-      ["removable-recent", { sessionId: "removable-recent-session", updatedAt: now - 1 }],
+      [key, makeEntry(now - 2, "cloud-placement-session")],
+      ["removable-old", makeEntry(now - 2, "removable-old-session")],
+      ["removable-recent", makeEntry(now - 1, "removable-recent-session")],
     ]);
     const admission = await beginSessionEffect({
       scope: storePath,
@@ -226,8 +221,8 @@ describe("applyFileBackedSessionStoreMaintenance", () => {
     const activeSessionId = "shared-session-id";
     const makeActiveStore = () =>
       makeStore([
-        ["old", { sessionId: activeSessionId, updatedAt: now - 31 * DAY_MS }],
-        ["new", { sessionId: "new-session", updatedAt: now - 1 }],
+        ["old", makeEntry(now - 31 * DAY_MS, activeSessionId)],
+        ["new", makeEntry(now - 1, "new-session")],
       ]);
     const admission = await beginSessionEffect({
       scope: activeStorePath,
@@ -294,8 +289,7 @@ describe("capEntryCount", () => {
   it("never evicts the agent primary main session even when protected entries fill the cap (#112637)", () => {
     const now = Date.now();
     const mainKey = "agent:main:main";
-    // `main` is the oldest entry, so pre-fix it was the first unprotected eviction target once
-    // protected thread entries (>= maxEntries) left zero removable budget.
+    // Oldest main remains protected even when threads leave zero removable budget.
     const store = makeStore([
       [mainKey, makeEntry(now - 10 * DAY_MS)],
       ["agent:main:slack:channel:C1:thread:1", makeEntry(now - 3 * DAY_MS)],
@@ -347,16 +341,12 @@ describe("resolveMaintenanceConfigFromInput", () => {
       const transcriptPath = path.join(dir, "old-session.jsonl");
       await fs.writeFile(transcriptPath, JSON.stringify({ role: "user", content: "hello" }));
       const store: Record<string, SessionEntry> = {
-        "agent:main:subagent:old-worker": {
-          sessionId: "old-session",
-          updatedAt: 1,
-          transcriptPath,
-        },
+        "agent:main:subagent:old-worker": makeEntry(1, "old-session", { transcriptPath }),
       };
       await saveSessionStore(storePath, store, { skipMaintenance: true });
 
       const maintenance = resolveMaintenanceConfigFromInput({ maxDiskBytes: 0 });
-      const result = await enforceSessionDiskBudget({
+      await enforceSessionDiskBudget({
         store,
         storePath,
         maintenance,
@@ -364,7 +354,6 @@ describe("resolveMaintenanceConfigFromInput", () => {
       });
 
       expect(maintenance).toMatchObject(disabledBudget);
-      expect(result).toBeNull();
       await fs.access(transcriptPath);
     });
   });
@@ -480,14 +469,13 @@ describe("recent session preservation", () => {
         [externalKey]: makeEntry(now - 9 * DAY_MS, "external"),
       };
 
-      const result = await enforceSessionDiskBudget({
+      await enforceSessionDiskBudget({
         store,
         storePath: path.join(dir, "sessions.json"),
         maintenance: { highWaterBytes: 1, maxDiskBytes: 1, preserveRecentMs },
         warnOnly: false,
       });
 
-      expect(result?.removedEntries).toBe(1);
       expect(store).toHaveProperty(recentKey);
       expect(store).toHaveProperty(externalKey);
       expect(store).not.toHaveProperty(staleKey);

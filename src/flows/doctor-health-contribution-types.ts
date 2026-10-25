@@ -20,6 +20,8 @@ import type { HealthCheckContext, HealthFinding } from "./health-checks.js";
 
 type DoctorConfigResult = {
   cfg: OpenClawConfig;
+  /** Captured before config retirement; shared by every heartbeat migration step. */
+  heartbeatMigrationSource?: OpenClawConfig;
   warnings?: string[];
   /** Original authored/resolved pair; retained across every committed Doctor write. */
   referenceSource?: DoctorConfigReferenceSource;
@@ -56,6 +58,7 @@ type DoctorConfigResult = {
   stateMigrationStepReceipts?: LegacyStateMigrationStepReceipt[];
   postSessionPluginMigration?: PreparedPostSessionPluginMigration;
   postSessionPluginMigrationPlanBound?: boolean;
+  preflightLegacyStateConfig?: OpenClawConfig;
 };
 
 export type DoctorHealthFlowContext = {

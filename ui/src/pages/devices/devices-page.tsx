@@ -34,7 +34,7 @@ import {
   saveExecApprovals,
   updateExecApprovalsFormValue,
   type ExecApprovalsTarget,
-  type DevicesPageDataState,
+  type DevicesPageDataState as DevicesState,
 } from "../../lib/nodes/page-operations.ts";
 import { createPageRequest } from "../../lib/page-request.ts";
 import { useApplication } from "../../lib/reactive/context.ts";
@@ -102,7 +102,7 @@ export function DevicesPage(props: { routeData?: DevicesRouteData }) {
     gatewayClient: () => gatewayBinding.client,
     gatewayUrl: () => context.gateway.connection.gatewayUrl,
     runPageTask,
-    runInventoryTask,
+    runInventoryTask: (task) => inventoryActions.run(() => runPageTask(task)).presented,
     rotateDevice: (params) =>
       inventoryActions.run(() => runPageTask((pageState) => rotateDeviceToken(pageState, params)))
         .result,
@@ -232,15 +232,15 @@ export function DevicesPage(props: { routeData?: DevicesRouteData }) {
     read: inventoryRead,
     publish: () => publishData(),
   });
-  function runInventoryTask(task: (pageState: DevicesPageDataState) => unknown) {
-    return inventoryActions.run(() => runPageTask(task)).presented;
-  }
   onSettled(() => {
+    void context.runtimeConfig.ensureLoaded().catch(() => undefined);
     syncConfigCustody();
     // Config receipts record which connection owns the accepted policy draft.
     const stopConfig = configProjection.subscribe(syncConfigCustody);
     const stopRoute = context.router.subscribe(() => {
       inventoryActions.retire();
+      dataState.devicesDeciding = [];
+      publishData();
       const route = context.router.getState();
       if ((route.pendingMatches[0] ?? route.matches[0])?.routeId !== "devices") {
         policyActions.retire();
@@ -359,6 +359,7 @@ export function DevicesPage(props: { routeData?: DevicesRouteData }) {
   }
 
   function invalidateRequests() {
+    dataState.devicesDeciding = [];
     policyActions.retire();
     inventoryActions.retire();
     dataState.requestGeneration = gatewayBinding.epoch;
@@ -459,9 +460,7 @@ export function DevicesPage(props: { routeData?: DevicesRouteData }) {
     execApprovalsTargetNodeId = null;
   }
 
-  async function runPageTask<T>(
-    task: (pageState: DevicesPageDataState) => T | Promise<T>,
-  ): Promise<T> {
+  async function runPageTask<T>(task: (pageState: DevicesState) => T | Promise<T>): Promise<T> {
     const pageState = dataState;
     try {
       const result = task(pageState);
@@ -476,7 +475,7 @@ export function DevicesPage(props: { routeData?: DevicesRouteData }) {
     }
   }
 
-  function runAdminTask(task: (pageState: DevicesPageDataState) => unknown) {
+  function runAdminTask(task: (pageState: DevicesState) => unknown) {
     if (canAdmin) {
       void runPageTask(task);
     }
@@ -643,6 +642,7 @@ export function DevicesPage(props: { routeData?: DevicesRouteData }) {
       devicesLoading: devices.devicesLoading,
       devicesError: devices.devicesError,
       devicesList: devices.devicesList,
+      devicesDeciding: devices.devicesDeciding,
       canPairDevice: canAdmin,
       canManagePairing,
       canAdmin,
@@ -666,13 +666,13 @@ export function DevicesPage(props: { routeData?: DevicesRouteData }) {
       },
       onDeviceApprove: (requestId) => {
         if (canManagePairing) {
-          void runInventoryTask((pageState) => approveDevicePairing(pageState, requestId));
+          void runPageTask((pageState) => approveDevicePairing(pageState, requestId));
         }
       },
       onDeviceReject: (requestId) => void dialogs.confirmPairingReject("device", requestId),
       onNodeApprove: (requestId) => {
         if (canManagePairing) {
-          void runInventoryTask((pageState) => approveNodePairingRequest(pageState, requestId));
+          void runPageTask((pageState) => approveNodePairingRequest(pageState, requestId));
         }
       },
       onNodeReject: (requestId) => void dialogs.confirmPairingReject("node", requestId),

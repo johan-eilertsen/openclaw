@@ -1,6 +1,6 @@
 import { Errored, For, Loading, Show, createMemo, createUniqueId, latest } from "solid-js";
 import { Icon } from "../../components/solid/icon.tsx";
-import { Menu, type MenuItem } from "../../components/solid/menu.tsx";
+import { Menu, type MenuEntry, type MenuItem } from "../../components/solid/menu.tsx";
 import { registerSystemsEnglish } from "../../i18n/locales/en-systems.ts";
 import { prettifyPlatform } from "../../lib/platform-label.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
@@ -77,7 +77,6 @@ export function systemPlatform(row: SystemsInventoryRow): string | undefined {
 }
 
 type SystemsSidebarProps = { controller?: Systems };
-type SystemsSidebarElement = SolidBridgeElement<SystemsSidebarProps>;
 function SystemsSidebarContent(props: SystemsSidebarProps) {
   const projection = createMemo(() =>
     props.controller ? projectOwner(props.controller, (value) => value) : null,
@@ -151,6 +150,29 @@ function SystemsInventory(props: { controller: Systems }) {
       </span>
     ),
   });
+  const filterItems = createMemo((): readonly MenuEntry[] => [
+    {
+      kind: "content",
+      id: "sort-heading",
+      content: <div class="sidebar-session-sort-menu__title">{t("systems.sortBy")}</div>,
+    },
+    ...sortOptions.map((option) =>
+      filterItem("sort", option, controller().state.sortMode === option.value),
+    ),
+    {
+      kind: "content",
+      id: "status-heading",
+      content: (
+        <>
+          <div class="session-menu__separator" role="separator" />
+          <div class="sidebar-session-sort-menu__title">{t("systems.status")}</div>
+        </>
+      ),
+    },
+    ...statusOptions.map((option) =>
+      filterItem("status", option, controller().state.statusFilter === option.value),
+    ),
+  ]);
   const renderRow = (row: SystemsInventoryRow) => {
     const online = row.environment.status === "available";
     const platform = systemPlatform(row);
@@ -207,29 +229,7 @@ function SystemsInventory(props: { controller: Systems }) {
           ]}
           triggerAttributes={{ title: t("systems.filterSort") }}
           trigger={<Icon name="listFilter" />}
-          items={[
-            {
-              kind: "content",
-              id: "sort-heading",
-              content: <div class="sidebar-session-sort-menu__title">{t("systems.sortBy")}</div>,
-            },
-            ...sortOptions.map((option) =>
-              filterItem("sort", option, controller().state.sortMode === option.value),
-            ),
-            {
-              kind: "content",
-              id: "status-heading",
-              content: (
-                <>
-                  <div class="session-menu__separator" role="separator" />
-                  <div class="sidebar-session-sort-menu__title">{t("systems.status")}</div>
-                </>
-              ),
-            },
-            ...statusOptions.map((option) =>
-              filterItem("status", option, controller().state.statusFilter === option.value),
-            ),
-          ]}
+          items={filterItems()}
           onSelect={(item) => {
             const value = item.id;
             const sort = sortOptions.find((option) => value === `sort:${option.value}`);
@@ -302,6 +302,6 @@ defineSolidBridge<SystemsSidebarProps>("openclaw-systems-sidebar", SystemsSideba
 
 declare global {
   interface HTMLElementTagNameMap {
-    "openclaw-systems-sidebar": SystemsSidebarElement;
+    "openclaw-systems-sidebar": SolidBridgeElement<SystemsSidebarProps>;
   }
 }

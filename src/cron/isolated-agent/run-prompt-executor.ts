@@ -40,10 +40,7 @@ import {
 } from "../../sessions/user-turn-transcript.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
-import {
-  mintCronPromptExecutionContext,
-  resolveCronJobToolPolicyContext,
-} from "../execution-context-admission.js";
+import { resolveCronJobToolPolicyContext } from "../execution-context-admission.js";
 import { prepareCronRunAdmission } from "../run-admission.js";
 import { prepareCronRunInference } from "../run-inference.js";
 import { resolveCronAuthenticatedChannelRequester } from "../tools-allow-provenance.js";
@@ -80,6 +77,18 @@ const cronEmbeddedRuntimeLoader = createLazyImportLoader<CronEmbeddedRuntime>(
   () => import("./run-embedded.runtime.js"),
 );
 
+// A CLI child in its parent's workspace runs native tools no tool check sees, so
+// its process also ends when the parent resets.
+function resolveCliChildAbortSignal(
+  runSignal: AbortSignal | undefined,
+  parentSignal: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (!parentSignal) {
+    return runSignal;
+  }
+  return runSignal ? AbortSignal.any([runSignal, parentSignal]) : parentSignal;
+}
+
 function hasCliSessionReuseMetadata(binding: CliSessionBinding): boolean {
   return Object.entries(binding).some(([key, value]) => key !== "sessionId" && value !== undefined);
 }
@@ -96,14 +105,7 @@ export function createCronPromptExecutor(
 ) {
   const trigger = params.trigger === "event" ? "event" : "cron";
   const cronFallbacksOverride =
-    params.modelFallbacksOverride ??
-    resolveCronFallbacksOverride({
-      cfg: params.cfg,
-      job: params.job,
-      agentId: params.agentId,
-      useSubagentFallbacks: params.useSubagentFallbacks,
-      inheritDefaultFallbacksForAgentStringModel: params.inheritDefaultFallbacksForAgentStringModel,
-    });
+    params.modelFallbacksOverride ?? resolveCronFallbacksOverride(params);
   const fastModeStartedAtMs = Date.now();
   const fastModeAutoProgressState: FastModeAutoProgressState = {
     offAnnounced: false,
@@ -203,30 +205,33 @@ export function createCronPromptExecutor(
             errorContext: "cron user turn transcript",
           });
     pendingUserTurn = { promptText, recorder: userTurnTranscriptRecorder };
-    const scheduledExecution = await mintCronPromptExecutionContext(params, { runId, trigger });
-    // Admission releases the context when it closes; a failed preparation never reaches close.
-    let cronAdmission: ReturnType<typeof prepareCronRunAdmission>;
-    try {
-      cronAdmission = prepareCronRunAdmission({
-        scheduledExecution,
-        operatorAuthority: params.operatorAuthority,
-        admissionSource: params.admissionSource,
-        deliveryAttemptFence: params.deliveryAttemptFence,
+    const cronAdmission = prepareCronRunAdmission({
+      scheduledExecution: params.occurrence.mint({
         cfg: params.cfgWithAgentDefaults,
         agentId: params.agentId,
         runId,
-        sessionId: params.cronSession.sessionEntry.sessionId,
-        sessionKey: params.runSessionKey,
-        jobId: params.job.id,
-        channelRequester: resolveCronAuthenticatedChannelRequester(params.job),
+        runSessionKey: params.runSessionKey,
         toolsAllow: params.agentPayload?.toolsAllow,
-        scheduledToolPolicy,
-        executionIdentity: params.executionIdentity,
-      });
-    } catch (error) {
-      scheduledExecution.release();
-      throw error;
-    }
+        operatorAuthorityRestored: params.operatorAuthority !== undefined,
+      }),
+      operatorAuthority: params.operatorAuthority,
+      admissionSource: params.admissionSource,
+      // A child running in its parent's workspace loses every effect once that parent resets.
+      ...(params.occurrence.childParent?.binding
+        ? { assertSourceCurrent: params.occurrence.childParent.assertCurrent }
+        : {}),
+      deliveryAttemptFence: params.deliveryAttemptFence,
+      cfg: params.cfgWithAgentDefaults,
+      agentId: params.agentId,
+      runId,
+      sessionId: params.cronSession.sessionEntry.sessionId,
+      sessionKey: params.runSessionKey,
+      jobId: params.job.id,
+      channelRequester: resolveCronAuthenticatedChannelRequester(params.job),
+      toolsAllow: params.agentPayload?.toolsAllow,
+      scheduledToolPolicy,
+      executionIdentity: params.executionIdentity,
+    });
     params.onPromptAdmission(cronAdmission);
     // Record the cron source fact at its producer for the run's lifetime so
     // exec-approval creation and standing-grant use never infer job identity
@@ -393,6 +398,7 @@ export function createCronPromptExecutor(
           agentId: params.agentId,
           sessionKey: params.runSessionKey,
           preparedSessionEntry: params.cronSession.sessionEntry,
+          inheritedSandbox: params.occurrence.childParent?.sandbox,
         });
         assertCronCandidateSandboxPlacement({
           ...sandboxPlacement,
@@ -462,6 +468,9 @@ export function createCronPromptExecutor(
             messageChannel,
             agentAccountId: params.resolvedDelivery.accountId,
             extraSystemPrompt: params.deliverySystemPrompt,
+            extraSystemPromptTurnContext: params.deliverySystemPrompt
+              ? { start: 0, text: params.deliverySystemPrompt }
+              : undefined,
             sourceReplyDeliveryMode: sourceDelivery.sourceReplyDeliveryMode,
             requireExplicitMessageTarget: sourceDelivery.messageTool.requireExplicitTarget,
             messageToolFinalByDefault: sourceDelivery.messageTool.finalByDefault,
@@ -497,7 +506,10 @@ export function createCronPromptExecutor(
             sessionId: params.cronSession.sessionEntry.sessionId,
             sessionKey: params.runSessionKey,
             sessionFile: params.runSessionKey,
-            abortSignal: params.abortSignal,
+            abortSignal: resolveCliChildAbortSignal(
+              params.abortSignal,
+              params.occurrence.childParent?.signal,
+            ),
           });
           try {
             const cliAbortSignal = deferredLifecycle.signal;
@@ -513,22 +525,31 @@ export function createCronPromptExecutor(
                 const cliSessionBinding = params.cronSession.isNewSession
                   ? undefined
                   : await getCliSessionBinding(params.cronSession.sessionEntry, executionProvider);
-                const authProfileId = allowCliAuthProfileForwarding
-                  ? await resolveCliExecutionAuthProfileId({
-                      cliExecutionProvider: executionProvider,
-                      authProfileProvider: providerOverride,
-                      config: params.cfgWithAgentDefaults,
-                      agentDir: params.agentDir,
-                      sessionBinding: cliSessionBinding,
-                      selected: params.liveSelection.authProfileId
+                const resolveForwardedProfile = (
+                  selected: Parameters<typeof resolveCliExecutionAuthProfileId>[0]["selected"],
+                ) =>
+                  allowCliAuthProfileForwarding
+                    ? resolveCliExecutionAuthProfileId({
+                        cliExecutionProvider: executionProvider,
+                        authProfileProvider: providerOverride,
+                        config: params.cfgWithAgentDefaults,
+                        agentDir: params.agentDir,
+                        sessionBinding: cliSessionBinding,
+                        selected,
+                      })
+                    : Promise.resolve(undefined);
+                // A recorded account runs only when this backend forwards exactly that account.
+                const authProfileId = inference
+                  ? await inference.resolveCliAuthProfile(resolveForwardedProfile)
+                  : await resolveForwardedProfile(
+                      params.liveSelection.authProfileId
                         ? {
                             authProfileId: params.liveSelection.authProfileId,
                             authProfileIdSource:
                               params.liveSelection.authProfileIdSource === "user" ? "user" : "auto",
                           }
                         : undefined,
-                    })
-                  : undefined;
+                    );
                 if (trigger === "cron" && !binding && authProfileId) {
                   const refusal = new Error(
                     "Automation has no recorded inference account. Explicitly select its account with a model@profile update before running it.",
@@ -558,6 +579,13 @@ export function createCronPromptExecutor(
                   ),
                   provider: executionProvider,
                   authProfileId,
+                  // Keep the recorded credential lifetime live through CLI preparation and launch.
+                  assertCurrent: inference
+                    ? () => {
+                        assertSettlementCurrent();
+                        inference.runParams.authProfileBinding?.assertCurrent();
+                      }
+                    : undefined,
                   nativeAuthOnly: trigger === "cron" && !binding ? true : undefined,
                   cliSessionId: cliSessionBinding?.sessionId,
                   cliSessionBinding: guardedCliSessionBinding,

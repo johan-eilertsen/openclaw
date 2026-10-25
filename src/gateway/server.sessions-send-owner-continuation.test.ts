@@ -16,8 +16,11 @@ import {
   createCronCreatorAuthorityCapability,
   runWithCronCreatorAuthorityCapability,
 } from "../agents/cron-creator-authority-context.js";
+import * as runWait from "../agents/run-wait.js";
 import * as completionDelivery from "../agents/subagents/announce/subagent-announce-completion-delivery.js";
 import { SessionFollowupCompletion } from "../agents/subagents/completion/session-followup-completion.js";
+import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
+import { subscribeSubagentRunChanges } from "../agents/subagents/registry/subagent-registry-publication.js";
 import { revokeRequesterCronAuthority } from "../agents/subagents/requester-cron-authority.js";
 import {
   createAdmittedGatewayToolCallerIdentity,
@@ -44,6 +47,7 @@ import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-reque
 import { setPluginRuntimeLoadContext } from "../plugins/runtime/load-context.js";
 import { createPluginRecord } from "../plugins/status.test-helpers.js";
 import { acquireTestPortBlock } from "../test-utils/port-claims.js";
+import { captureGatewayKernel } from "./server.capture-kernel.test-support.js";
 import {
   agentCommandMock,
   installGatewayTestHooks,
@@ -69,17 +73,9 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
 let server: Awaited<ReturnType<typeof startTestGatewayServer>>;
 let kernel: Awaited<ReturnType<(typeof import("./server-kernel.js"))["createGatewayKernel"]>>;
 beforeAll(async () => {
-  const module = await import("./server-kernel.js");
-  const create = module.createGatewayKernel;
-  const capture = vi.spyOn(module, "createGatewayKernel").mockImplementation(async (...args) => {
-    kernel = await create(...args);
-    return kernel;
-  });
-  try {
+  kernel = await captureGatewayKernel(async () => {
     server = await startTestGatewayServer(await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] }));
-  } finally {
-    capture.mockRestore();
-  }
+  });
 });
 afterAll(() => server.close());
 
@@ -151,25 +147,52 @@ it.for([
     const parentFinished = createDeferred();
     const inlineWaitStarted = createDeferred();
     const requesterAccepted = createDeferred();
-    const completionClosed = createDeferred();
+    const completionSettled = createDeferred();
+    let childRunId: string | undefined;
     let closeCompletion: (() => void) | undefined;
     let readCompletionProgress: (() => SessionFollowupCompletion["progress"]) | undefined;
     let requesterReceipt: unknown;
-    const onCompletionClosed = () => completionClosed.resolve();
+    const stopObservingCompletion = subscribeSubagentRunChanges("persistence", () => {
+      const entry = childRunId ? subagentRuns.get(childRunId) : undefined;
+      if (
+        entry &&
+        (entry.delivery?.status === "delivered" ||
+          entry.delivery?.status === "suspended" ||
+          entry.delivery?.status === "discarded" ||
+          entry.delivery?.disposition === "permanent_failure" ||
+          entry.cleanupCompletedAt !== undefined)
+      ) {
+        completionSettled.resolve();
+      }
+    });
+    const onCompletionClosed = () => completionSettled.resolve();
+    const observePeerCompletion = visiblePeer
+      ? vi.spyOn(SessionFollowupCompletion.prototype, "take").mockImplementationOnce(function (
+          this: SessionFollowupCompletion,
+          timeoutMs,
+        ) {
+          observePeerCompletion?.mockRestore();
+          const pending = this.take(timeoutMs);
+          if (timeoutMs !== undefined) {
+            readCompletionProgress = () => this.progress;
+            expect(this.request.visibleReply).toBe(true);
+            expect(this.request.targetAgentId).toBe("peer");
+            this.signal.addEventListener("abort", onCompletionClosed, { once: true });
+            closeCompletion = () => {
+              this.close();
+              this.signal.removeEventListener("abort", onCompletionClosed);
+            };
+            inlineWaitStarted.resolve();
+          }
+          return pending;
+        })
+      : undefined;
+    const waitForReply = runWait.waitForAgentRunReply;
     const observeInlineWait = vi
-      .spyOn(SessionFollowupCompletion.prototype, "take")
-      .mockImplementationOnce(function (this: SessionFollowupCompletion, timeoutMs) {
-        observeInlineWait.mockRestore();
-        const pending = this.take(timeoutMs);
-        if (timeoutMs !== undefined) {
-          readCompletionProgress = () => this.progress;
-          expect(this.request.visibleReply).toBe(visiblePeer);
-          expect(this.request.targetAgentId).toBe(visiblePeer ? "peer" : "main");
-          this.signal.addEventListener("abort", onCompletionClosed, { once: true });
-          closeCompletion = () => {
-            this.close();
-            this.signal.removeEventListener("abort", onCompletionClosed);
-          };
+      .spyOn(runWait, "waitForAgentRunReply")
+      .mockImplementation((params) => {
+        const pending = waitForReply(params);
+        if (!visiblePeer && params.timeoutMs === 1_000) {
           inlineWaitStarted.resolve();
         }
         return pending;
@@ -270,6 +293,7 @@ it.for([
       });
       await opts.userTurnTranscriptRecorder?.persistApproved();
       if (opts.sessionKey === child) {
+        childRunId = runId;
         await childMayFinish.promise;
         if (outcome === "child error") {
           throw new Error("synthetic child failure");
@@ -397,7 +421,7 @@ it.for([
       }
       await gate(
         requesterAccepted.promise,
-        completionClosed.promise,
+        completionSettled.promise,
         "Completion ended before requester admission",
       );
       // Cross the native accepted-ack yield without advancing run deadlines.
@@ -423,15 +447,18 @@ it.for([
       }
       effectMayFinish.resolve();
       await wait(parentFinished.promise);
-      await wait(completionClosed.promise);
+      await wait(completionSettled.promise);
       expect(parentError).toBeUndefined();
       expect(requesterReceipt).toMatchObject({ status: "ok" });
       if (visiblePeer) {
-        // The command fixture performs no channel send. Keep its missing visible
-        // receipt truthful; this proof owns plugin effects, not channel delivery.
+        // This command fixture performs no channel send. It proves the plugin
+        // effect, while the completion must still report the missing visible receipt.
         expect(readCompletionProgress?.().phase).toBe("failed");
       } else {
         expect(requesterReceipt).toMatchObject({ inputProcessingCompleted: true });
+        expect(subagentRuns.get(expectDefined(childRunId, "child run ID"))).toMatchObject({
+          delivery: { status: "delivered" },
+        });
       }
       if (outcome === "success" || outcome === "child error") {
         expect(pluginError).toBeUndefined();
@@ -450,6 +477,8 @@ it.for([
     } finally {
       unblock();
       closeCompletion?.();
+      stopObservingCompletion();
+      observePeerCompletion?.mockRestore();
       observeInlineWait.mockRestore();
       observeRequesterAdmission.mockRestore();
       if (vi.isFakeTimers()) {

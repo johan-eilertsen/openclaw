@@ -12,8 +12,8 @@ import {
   retainLegacyDefaultAgentId,
   tryGetLegacyDefaultAgentId,
 } from "../config/legacy.default-agent-owner.js";
-import { findLegacyConfigRuleIssues } from "../config/legacy.js";
 import { resolveLegacyAgentRosterOwner } from "../config/legacy.roster.js";
+import { findLegacyConfigRuleIssues } from "../config/legacy.shared.js";
 import { CONFIG_PATH } from "../config/paths.js";
 import { setAppliedRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -96,6 +96,14 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
       ),
   });
   const { snapshot, baseConfig: baseCfg } = preflight;
+  if (!shouldRepair && !params.options.json) {
+    const { collectRecoveryDiskUsage, formatRecoveryDiskUsage } =
+      await import("./recovery-disk-usage.js");
+    note(
+      formatRecoveryDiskUsage(collectRecoveryDiskUsage({ cfg: baseCfg, env: process.env })),
+      "Recovery copies (read-only)",
+    );
+  }
   preparingResources.use(preflight.pluginCache);
   if (!snapshot.exists || snapshot.valid) {
     await setAppliedRuntimeConfigSnapshot(snapshot.runtimeConfig, snapshot.sourceConfig);
@@ -115,11 +123,6 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
     }),
   );
   const runWithPluginMetadataSnapshot = pluginMetadataSnapshotScope.run;
-  const invalidatePluginMetadataSnapshot = () => {
-    // Filesystem/install repairs replace the authoritative plugin generation.
-    pluginMetadataSnapshotState.current = undefined;
-    pluginMetadataSnapshotScope.invalidate();
-  };
   const runWithCurrentPluginMetadata = <T>(config: OpenClawConfig, run: () => T): T => {
     const soleAgentId = tryResolveSoleAgentId(config);
     return runWithPluginMetadataSnapshot(
@@ -596,6 +599,7 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
     note(notes.sanitizeDoctorNote(mutableAllowlistWarnings.join("\n")), "Doctor warnings");
   }
 
+  // Retain normalized source facts before retirement removes heartbeat settings.
   const modelBillingRouteConfig = state.candidate;
   state = await applyRetiredConfigStep({
     state,
@@ -669,6 +673,12 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
     metadataSnapshot: pluginMetadataSnapshotState.current,
     runWithCurrentPluginMetadata,
   });
+  const invalidatePluginMetadataSnapshot = () => {
+    // Filesystem/install repairs replace the authoritative plugin generation.
+    delete configResult.preflightLegacyStateConfig;
+    pluginMetadataSnapshotState.current = undefined;
+    pluginMetadataSnapshotScope.invalidate();
+  };
 
   // Queued repair panels describe candidate mutations; the write runner prints
   // them as "Doctor changes" only after the atomic write commits. A blocked
@@ -683,10 +693,11 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   // Later Doctor contributions and service finalization consume these callbacks.
   const resources = preparingResources.move();
 
-  return {
+  const configResult = {
     [Symbol.asyncDispose]: () => resources.disposeAsync(),
     ...finalized,
     cfg,
+    heartbeatMigrationSource: modelBillingRouteConfig,
     ...(shouldWriteConfig && sessionStoreOwnerRecovery.changes.length > 0
       ? {
           confirmedConfigSource: {
@@ -727,4 +738,5 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
     runWithPluginMetadataSnapshot,
     invalidatePluginMetadataSnapshot,
   };
+  return configResult;
 }

@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 import { createDeferred, withinTest } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
+import { sessionStorageStatus } from "./session-storage.test-support.ts";
 import { SessionStorageSettings } from "./session-storage.tsx";
 import {
   clickSettings,
@@ -13,8 +14,8 @@ import {
 
 type Maintenance = Partial<SessionsStorageStatusResult["maintenance"]>;
 function inventory(count: number, maintenance: Maintenance = {}): SessionsStorageStatusResult {
-  return {
-    agents: [
+  return sessionStorageStatus(
+    [
       {
         agentId: "main",
         storePath: "/synthetic/agent.sqlite",
@@ -26,22 +27,14 @@ function inventory(count: number, maintenance: Maintenance = {}): SessionsStorag
         embeddedArchiveBytes: 0,
       },
     ],
-    maintenance: {
-      running: false,
-      lastStartedAt: null,
-      lastCompletedAt: null,
-      lastError: null,
-      archivedTranscripts: 0,
-      externalizedTranscripts: 0,
-      ...maintenance,
-    },
-  };
+    maintenance,
+  );
 }
-async function mount() {
+async function mount(initialInventory = inventory(7)) {
   const config = { session: { maintenance: { coldStorage: { enabled: true, afterDays: 30 } } } };
   const respond = async (method: string): Promise<unknown> =>
     method === "sessions.storage.status"
-      ? inventory(7)
+      ? initialInventory
       : {
           config,
           hash: "raw-one",
@@ -60,7 +53,11 @@ async function mount() {
     };
   const client = { request } as unknown as GatewayBrowserClient;
   const mounted = await mountConfigSettings(client, () => <SessionStorageSettings />);
-  await waitText(mounted.page, "7 uncompressed");
+  const hotTranscripts = initialInventory.agents.reduce(
+    (sum, agent) => sum + agent.hotTranscripts,
+    0,
+  );
+  await waitText(mounted.page, `${hotTranscripts} uncompressed`);
   return { ...mounted, request, respond, reply };
 }
 function click(page: HTMLElement, label: string) {
@@ -77,6 +74,33 @@ function draft(page: HTMLElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
   return input;
 }
+it("retains expanded agent inventory rows across refreshes and updates reordered agent values", async () => {
+  const initial = inventory(7);
+  initial.agents.push({ ...initial.agents[0]!, agentId: "research", hotTranscripts: 3 });
+  const { page, request, reply } = await mount(initial);
+  const disclosure = page.querySelector<HTMLDetailsElement>("details.settings-row--stacked")!;
+  disclosure.open = true;
+  const rows = [...disclosure.querySelectorAll(".settings-row")];
+  expect(rows).toHaveLength(2);
+
+  request.mockImplementation(
+    reply("sessions.storage.status", async () => structuredClone(initial)),
+  );
+  click(page, "Refresh");
+  await waitForSolid(() => expect(button(page, "Refresh").disabled).toBe(false));
+  expect(rows.filter((row) => !page.contains(row))).toHaveLength(0);
+  expect(disclosure.open).toBe(true);
+
+  const updated = structuredClone(initial);
+  updated.agents[0]!.hotTranscripts = 11;
+  updated.agents.reverse();
+  request.mockImplementation(reply("sessions.storage.status", async () => updated));
+  click(page, "Refresh");
+  await waitText(page, "14 uncompressed");
+  expect([...disclosure.querySelectorAll(".settings-row")]).toEqual([rows[1], rows[0]]);
+  expect(rows[0]?.textContent).toContain("11 uncompressed");
+  expect(disclosure.open).toBe(true);
+});
 it.each([
   ["status", "reconnect"],
   ["run", "client"],
@@ -170,7 +194,7 @@ it("does not hold a replacement submission behind a retired request", async () =
 });
 
 it("keeps a days draft and inventory through reconnect and retires them on client replacement", async () => {
-  const { page, runtimeConfig, request, respond, reply, publish, client } = await mount();
+  const { page, runtimeConfig, request, reply, publish, client } = await mount();
   const input = draft(page, "14");
   request.mockImplementation(reply("sessions.storage.status", async () => inventory(42)));
   click(page, "Refresh");
@@ -202,7 +226,20 @@ it("keeps a days draft and inventory through reconnect and retires them on clien
   expect(runtimeConfig.state.configFormDirty).toBe(false);
   expect(request.mock.calls.some(([method]) => method === "config.set")).toBe(false);
 
-  publish(true, { request: vi.fn(respond) } as unknown as GatewayBrowserClient);
+  const replacement = createDeferred<SessionsStorageStatusResult>();
+  const replacementRequest = vi.fn(reply("sessions.storage.status", () => replacement.promise));
+  publish(true, { request: replacementRequest } as unknown as GatewayBrowserClient);
+  try {
+    await waitForSolid(() => {
+      expect(
+        replacementRequest.mock.calls.some(([method]) => method === "sessions.storage.status"),
+      ).toBe(true);
+      expect(input.value).toBe("30");
+      expect(page.textContent).not.toContain("21 uncompressed");
+    });
+  } finally {
+    replacement.resolve(inventory(7));
+  }
   await waitText(page, "7 uncompressed");
   expect(input.value).toBe("30");
 });

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testing as cliBackendsTesting } from "../agents/cli-backends.test-support.js";
+import { model as catalogModel } from "../agents/model-catalog-fixtures.test-support.js";
 import { SESSION_TOTAL_TOKENS_VERSION } from "../config/sessions/types.js";
 import type { ModelDefinitionConfig } from "../config/types.models.js";
 
@@ -14,15 +15,7 @@ import {
 } from "./status-message.test-support.js";
 
 function statusTestModel(id: string, name: string, contextWindow: number): ModelDefinitionConfig {
-  return {
-    id,
-    name,
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow,
-    maxTokens: 8_192,
-  };
+  return catalogModel(id, name, { contextWindow, maxTokens: 8_192 });
 }
 
 const displayParams: Partial<Parameters<typeof buildStatusMessage>[0]> = {
@@ -55,6 +48,27 @@ describe("buildStatusMessage current time", () => {
 });
 
 describe("buildStatusMessageParts presentation", () => {
+  it.each(["openai", "anthropic"])(
+    "shows configured text verbosity only for OpenAI (%s)",
+    (provider) => {
+      const parts = buildStatusMessageParts({
+        modelRefs: statusModelRefs({ provider, model: "verbosity-model" }),
+        agent: { model: `${provider}/verbosity-model` },
+        config: {
+          agents: {
+            defaults: {
+              models: { [`${provider}/verbosity-model`]: { params: { textVerbosity: "low" } } },
+            },
+          },
+        },
+      });
+      expect(parts.text.includes("text low")).toBe(provider === "openai");
+      const table = parts.presentation.blocks.find((block) => block.type === "table");
+      const modes = table?.type === "table" && table.rows.find((row) => row[0] === "🎛️ Modes")?.[1];
+      expect(String(modes).includes("text low")).toBe(provider === "openai");
+    },
+  );
+
   it("reports the loaded build commit", () => {
     using _ = vi.spyOn(Date, "now").mockReturnValue(1_751_529_600_000);
     const parts = buildStatusMessageParts({

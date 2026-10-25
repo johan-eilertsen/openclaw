@@ -21,6 +21,10 @@ import {
   type AgentToolGatewayRequestCaller,
 } from "./in-process-gateway.js";
 import { resolveSessionsSendReplyTarget } from "./sessions-delivery-target.js";
+import {
+  resolveSessionsSendReply,
+  SESSIONS_SEND_TRUNCATION_NOTE,
+} from "./sessions-send-helpers.js";
 import type { AgentStepSession } from "./sessions-send-tool.types.js";
 
 const log = createSubsystemLogger("agents/sessions-send");
@@ -96,12 +100,16 @@ export async function runSessionsSendA2AFlow(params: {
       }
       return;
     }
-    const reply = wait.replyText;
-    if (
-      wait.terminalReply?.disposition !== "visible" ||
-      !reply?.trim() ||
-      reply.trim() === HEARTBEAT_TOKEN
-    ) {
+    const { replyText: reply, replyTruncated } =
+      wait.terminalReply?.disposition === "visible"
+        ? await resolveSessionsSendReply(wait, {
+            runId: params.runId,
+            sessionKey: params.targetSessionKey,
+            agentId: params.targetAgentId,
+            callGateway: gatewayCall,
+          })
+        : {};
+    if (!reply?.trim() || reply.trim() === HEARTBEAT_TOKEN) {
       if (params.requireVisibleReply && params.requesterSessionKey) {
         await deliverRequesterReply({
           ...requesterStepContext,
@@ -206,7 +214,7 @@ export async function runSessionsSendA2AFlow(params: {
         ...requesterStepContext,
         sessionKey: params.requesterSessionKey,
         message: reply,
-        extraSystemPrompt: `${child ? "A child session" : "Another session"} returned the result of your earlier sessions_send request. ${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} This result is delivered once; your response will not be sent back to the ${child ? "child" : "target session"}.`,
+        extraSystemPrompt: `${child ? "A child session" : "Another session"} returned the result of your earlier sessions_send request. ${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} This result is delivered once; your response will not be sent back to the ${child ? "child" : "target session"}.${replyTruncated ? ` ${SESSIONS_SEND_TRUNCATION_NOTE}` : ""}`,
         sourceAgentId: params.targetAgentId,
       });
     }

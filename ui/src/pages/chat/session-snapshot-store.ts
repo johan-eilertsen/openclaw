@@ -75,6 +75,9 @@ const paginationSchema = {
 };
 const snapshotSchema = json.object(
   {
+    composer: json.optional(
+      json.nullable(json.object({ id: json.text, provider: json.text, name: json.text })),
+    ),
     board: json.optional(
       json.nullable(json.object({ snapshot: json.unknown, receivedAtMs: nonnegative }, true)),
     ),
@@ -415,15 +418,17 @@ async function accessSidebarSnapshot<Model>(
       store.put(incoming);
     }
     let bytes = 0;
+    let count = 0;
     let result: Model | null = null;
-    for (const [index, record] of retained.toSorted((a, b) => b.savedAt - a.savedAt).entries()) {
+    for (const record of retained.toSorted((a, b) => b.savedAt - a.savedAt)) {
       const admitted = validate(record.model);
       if (admitted === null) {
-        throw new Error("sidebar projection shape mismatch");
+        store.delete(record.sessionKey);
+        continue;
       }
       bytes += sidebarRecordBytes(record);
       if (
-        index >= 8 ||
+        count++ >= 8 ||
         bytes > 512 * 1024 ||
         Date.now() - record.savedAt > 30 * 24 * 60 * 60 * 1000
       ) {

@@ -2,8 +2,16 @@ import {
   hasCompletionMessageSessionSpawn,
   type AcceptedSessionSpawn,
 } from "../../agents/accepted-session-spawn.js";
+import {
+  hasCommittedSourceReplyDeliveryEvidence,
+  hasVisibleCommittedMessagingToolDeliveryEvidence,
+} from "../../agents/embedded-agent-runner/delivery-evidence.js";
 import { adoptMediaGenerationProgressDraft } from "../../agents/media-generation-activity.js";
-import { isRequiredReplyExpectation, type ReplyCompletion } from "../../agents/reply-completion.js";
+import {
+  isRequiredReplyExpectation,
+  resolveReplyCompletion,
+  type ReplyCompletion,
+} from "../../agents/reply-completion.js";
 import { listSessionFollowupCompletions } from "../../agents/subagents/completion/session-followup-completion.js";
 import type { FollowupCompletionOwner } from "../../agents/subagents/completion/session-followup-completion.types.js";
 import {
@@ -17,6 +25,7 @@ import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-wo
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
 import { getReplyPayloadMetadata, setReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
+import type { SettledAgentTurn } from "./agent-runner-execution.types.js";
 import type { FinalizeReplyAgentRunInput } from "./agent-runner-result.types.js";
 import type { PendingContinuationSettlement } from "./get-reply.types.js";
 import { resolveReplyOperationAbortReason } from "./reply-operation-abort.js";
@@ -97,6 +106,32 @@ export function buildWaitingStatusPayload(params: {
       continuationStatus: true,
     },
   );
+}
+
+/** Queued delivery interprets its settled result through the same waiting-status owner. */
+export function buildQueuedWaitingStatusPayload(params: {
+  result: SettledAgentTurn["result"];
+  completion: ReplyCompletion;
+  peerContinuation: boolean;
+}): ReplyPayload | undefined {
+  const { result, completion, peerContinuation } = params;
+  return buildWaitingStatusPayload({
+    completion: peerContinuation ? resolveReplyCompletion("required", "pending") : completion,
+    continuationPending: result.meta?.continuationPending === true || peerContinuation,
+    peerContinuation,
+    mediaContinuation:
+      result.meta?.continuationPending === true &&
+      !hasCompletionMessageSessionSpawn(result.acceptedSessionSpawns),
+    yielded: result.meta?.yielded === true,
+    yieldAcknowledgment: result.meta?.yieldAcknowledgment,
+    // Child spawns are side effects, not user-visible messages. They must not
+    // suppress the explicit waiting reply for the parent turn.
+    hasVisibleMessageDelivery:
+      !peerContinuation &&
+      (hasCommittedSourceReplyDeliveryEvidence(result) ||
+        hasVisibleCommittedMessagingToolDeliveryEvidence(result) ||
+        result.didSendDeterministicApprovalPrompt === true),
+  });
 }
 
 /**

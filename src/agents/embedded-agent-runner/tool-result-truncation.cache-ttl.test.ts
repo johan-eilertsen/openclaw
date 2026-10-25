@@ -1,6 +1,7 @@
 import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentContextPruningConfig } from "../../config/types.agent-defaults.js";
+import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
 import { serializeCacheTtlToolResultProjections as snapshot } from "./cache-ttl-checkpoint.js";
 import { appendAttemptCacheTtlIfNeeded } from "./run/attempt-thread-helpers.js";
 import {
@@ -8,6 +9,7 @@ import {
   createToolResultPromptProjectionState as newState,
   retainEmbeddedSessionPromptState as retainState,
 } from "./session-prompt-state.js";
+import { replayToolResultPromptProjections } from "./tool-result-projection-replay.js";
 import {
   pruneExpiredCacheTtlToolResults,
   reconcileToolResultPromptProjectionState as reconcile,
@@ -110,6 +112,31 @@ function toolText(messages: AgentMessage[], id: string): string {
 }
 
 describe("cache-TTL tool-result projection", () => {
+  it.each(["cache-TTL", "aggregate"])(
+    "replays %s bytes for a fork without pruning new results or changing parent state",
+    (kind) => {
+      const state = newState();
+      const history = prunableHistory([
+        tool({ id: "old", text: "a".repeat(100_000) }),
+        tool({ id: "older", text: "c".repeat(100_000) }),
+      ]);
+      const sent =
+        kind === "cache-TTL"
+          ? project(history, { projectionState: state })
+          : truncate(history, 128_000, 100_000, 1_000, state).messages;
+      expect(toolText(sent, "old").length).toBeLessThan(100_000);
+      const freshResult = tool({ id: "fresh", text: "b".repeat(100_000) });
+      const before = structuredClone(state);
+
+      expect(replayToolResultPromptProjections([...history, freshResult], state)).toEqual([
+        ...sent,
+        freshResult,
+      ]);
+      expect(state).toEqual(before);
+      expect(toolText(history, "old")).toBe("a".repeat(100_000));
+    },
+  );
+
   it("preserves ordinary projected bytes across turn teardown and compaction", () => {
     const maxChars = 4_000;
     const sessionId = "ordinary-turn-teardown";
@@ -186,6 +213,7 @@ describe("cache-TTL tool-result projection", () => {
           entries.push({ type: "custom", customType, data: JSON.parse(serialized) });
         },
       };
+      using _ = vi.spyOn(Date, "now").mockReturnValueOnce(NOW);
       await appendAttemptCacheTtlIfNeeded({
         sessionManager,
         config: { agents: { defaults: { contextPruning: { mode: "cache-ttl" } } } },
@@ -195,7 +223,6 @@ describe("cache-TTL tool-result projection", () => {
         compactionOccurredThisAttempt: false,
         isCacheTtlEligibleProvider: () => true,
         toolResultPromptProjectionState: state,
-        now: NOW,
       });
       expect(entries.at(-1)?.data).toMatchObject({
         timestamp: NOW,
@@ -250,10 +277,13 @@ describe("cache-TTL tool-result projection", () => {
     const state = newState();
     restore(state, checkpoint({ prunedToolResults: [{ key: "tool:old:42", mode: "soft" }] }));
     // SAFETY: older malformed plugin content is handled by the existing replay guard.
-    const original = { ...tool({ id: "old" }), content: null } as unknown as AgentMessage;
+    const original = freezeJsonSnapshot({
+      ...tool({ id: "old" }),
+      content: null,
+    }) as unknown as AgentMessage;
     truncate([original], 128_000, 5_000, 20_000, state);
     const result = truncate(
-      [{ ...original, content: [] } as AgentMessage],
+      [freezeJsonSnapshot({ ...original, content: [] }) as AgentMessage],
       128_000,
       5_000,
       20_000,

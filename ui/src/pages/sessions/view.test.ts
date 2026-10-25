@@ -3,6 +3,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { createRoot, createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { createDeferred } from "../../../../test/helpers/promise.js";
 import { createOverlay, type Overlay } from "../../components/overlay-lifecycle.ts";
 import { registerModalSurface } from "../../components/overlay-registry.ts";
 import { flush } from "../../test-helpers/solid-settle.ts";
@@ -171,7 +172,7 @@ describe("sessions view", () => {
 
   it.each([false, true])(
     "shows the Agent column only in all-agent scope with category grouping %s",
-    (categoryGrouping) => {
+    async (categoryGrouping) => {
       const result = buildResult(
         createRow("agent:research:chat-two", { agentId: "research", category: "Work" }),
       );
@@ -205,13 +206,18 @@ describe("sessions view", () => {
         }
       }
 
+      const readiness = createDeferred<null>();
+      onTestFinished(() => readiness.resolve(null));
       renderView([], {
         ...sharedProps,
         allAgentsScope: false,
         result: null,
         loading: true,
+        roster: readiness.promise,
       });
-      expect(queryAll(".session-skeleton-row:first-child td")).toHaveLength(scopedHeaders.length);
+      await vi.waitFor(() =>
+        expect(queryAll(".session-skeleton-row:first-child td")).toHaveLength(scopedHeaders.length),
+      );
       renderView([], { ...sharedProps, allAgentsScope: false });
       expect(attr(".data-table-empty-cell", "colspan")).toBe(String(scopedHeaders.length));
     },
@@ -328,7 +334,8 @@ describe("sessions view", () => {
 
   it.each([
     ["profile-ada", "Ada Lovelace", "Ada Lovelace"],
-    ["gateway-owner", "Saved owner name", "Shared owner"],
+    ["gateway-owner", "Saved owner name", "Saved owner name · Shared owner"],
+    ["gateway-owner", undefined, "Shared owner"],
   ])("offers person grouping and labels the durable profile %s", async (id, name, expected) => {
     await renderSettled(
       [
@@ -627,6 +634,7 @@ describe("sessions view", () => {
     await renderSettled(initial, { expandedSessionKey: "agent:main:main" });
 
     const selects = queryAll<HTMLSelectElement>("tbody select");
+    const stats = [...queryAll(".session-detail-stat")];
     const [, fast, verbose, reasoning] = selects;
     expect([fast?.value, verbose?.value, reasoning?.value]).toEqual(["on", "full", "custom-mode"]);
     expect(optionValues(verbose)).toEqual(["", "off", "on", "full"]);
@@ -640,6 +648,7 @@ describe("sessions view", () => {
       { expandedSessionKey: "agent:main:main" },
     );
     const refreshed = queryAll("tbody select");
+    expect([...queryAll(".session-detail-stat")]).toEqual(stats);
     for (const [index, select] of [...selects].entries()) {
       expect(refreshed[index]).toBe(select);
     }
@@ -763,6 +772,25 @@ const escapeKey = (options: KeyboardEventInit = {}) =>
   new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true, ...options });
 
 describe("sessions transcript search view", () => {
+  it.each([{ isComposing: true }, { keyCode: 229 }, { ctrlKey: true }])(
+    "keeps transcript search open while Escape belongs to composition or a modified shortcut (%j)",
+    async (options) => {
+      document.body.append(container);
+      render({ transcriptSearchQuery: "keep query" });
+      transcriptTrigger()!.click();
+      await Promise.resolve();
+      const input = container.querySelector<HTMLInputElement>(
+        ".sessions-transcript-search__input input",
+      )!;
+      input.focus();
+      const event = escapeKey(options);
+      input.dispatchEvent(event);
+      await Promise.resolve();
+      expect(container.contains(input)).toBe(true);
+      expect(document.activeElement).toBe(input);
+      expect(event.defaultPrevented).toBe(false);
+    },
+  );
   it.each([true, false])(
     "keeps transcript submission separate from roster filtering (available=%s)",
     async (available) => {

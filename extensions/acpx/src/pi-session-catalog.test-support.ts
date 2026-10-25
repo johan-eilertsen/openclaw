@@ -3,22 +3,12 @@ import path from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import { afterEach, vi } from "vitest";
+import { createSessionCatalogContinuationStore } from "../../test-support/session-catalog-continuation.test-support.js";
 import { registerPiSessionCatalog } from "./pi-session-catalog-plugin.js";
 
 type RegisteredSessionCatalogProvider = Parameters<OpenClawPluginApi["registerSessionCatalog"]>[0];
 type NodeCommand = Parameters<OpenClawPluginApi["registerNodeHostCommand"]>[0];
-type OptionalCatalogAgent<T extends { agentId?: string }> = Omit<T, "agentId"> & {
-  agentId?: string;
-};
-type CatalogOperation = "list" | "read" | "continueSession" | "archive" | "openTerminal";
-export type TestSessionCatalogProvider = Omit<
-  RegisteredSessionCatalogProvider,
-  CatalogOperation
-> & {
-  [K in keyof Pick<RegisteredSessionCatalogProvider, CatalogOperation>]: (
-    params: OptionalCatalogAgent<Parameters<NonNullable<RegisteredSessionCatalogProvider[K]>>[0]>,
-  ) => ReturnType<NonNullable<RegisteredSessionCatalogProvider[K]>>;
-};
+export type TestSessionCatalogProvider = RegisteredSessionCatalogProvider;
 
 export const piSessionHeader = (overrides: Record<string, unknown> = {}) => ({
   type: "session",
@@ -40,7 +30,7 @@ export const piMessage = (
 export const piJsonl = (entries: unknown[]) =>
   `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 
-export function restorePiEnvironment(original: NodeJS.ProcessEnv) {
+function restorePiEnvironment(original: NodeJS.ProcessEnv) {
   for (const [key, value] of Object.entries(original)) {
     if (value === undefined) {
       delete process.env[key];
@@ -97,7 +87,7 @@ export function capturePiCatalog(
   return { provider: provider!, commands };
 }
 
-export function bindTestCatalogOwner(
+function bindTestCatalogOwner(
   provider: RegisteredSessionCatalogProvider,
 ): TestSessionCatalogProvider {
   const { continueSession, archive, openTerminal } = provider;
@@ -178,7 +168,7 @@ export async function createPiStoreFixture(
   return directory;
 }
 
-export async function installFakePiFixture(
+async function installFakePiFixture(
   temporaryDirectories: string[],
   originalPath: string | undefined,
 ): Promise<string> {
@@ -198,44 +188,9 @@ export async function installFakePiFixture(
 }
 
 export function capturePiContinuationCatalog() {
-  const entries: ReturnType<
-    NonNullable<OpenClawPluginApi["runtime"]["agent"]["session"]["listSessionEntries"]>
-  > = [];
-  const createSessionEntry = vi.fn(
-    async (
-      params: Parameters<OpenClawPluginApi["runtime"]["agent"]["session"]["createSessionEntry"]>[0],
-    ) => {
-      const sessionKey = `agent:${params.agentId ?? "main"}:${params.key}`;
-      const entry = {
-        sessionId: "adopted-pi-session",
-        updatedAt: Date.now(),
-        pluginOwnerId: "acpx",
-        initializationPending: true as const,
-        ...(params.label ? { label: params.label } : {}),
-        ...(params.displayName ? { displayName: params.displayName } : {}),
-        ...(params.spawnedCwd ? { spawnedCwd: params.spawnedCwd } : {}),
-        pluginExtensions: params.initialEntry.pluginExtensions,
-      };
-      entries.push({ sessionKey, entry });
-      const created = {
-        key: sessionKey,
-        agentId: params.agentId ?? "main",
-        sessionId: entry.sessionId,
-        entry,
-      };
-      try {
-        const finalPatch = await params.afterCreate?.(created);
-        entry.pluginExtensions = finalPatch?.pluginExtensions ?? entry.pluginExtensions;
-        delete (entry as { initializationPending?: true }).initializationPending;
-        return created;
-      } catch (error) {
-        entries.splice(
-          entries.findIndex((candidate) => candidate.entry === entry),
-          1,
-        );
-        throw error;
-      }
-    },
+  const { entries, createSessionEntry } = createSessionCatalogContinuationStore(
+    "acpx",
+    "adopted-pi-session",
   );
   const { provider } = capturePiCatalog(
     {

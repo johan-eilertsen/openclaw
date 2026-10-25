@@ -1,9 +1,7 @@
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
-import { hasCompletionMessageSessionSpawn } from "../../agents/accepted-session-spawn.js";
+import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
-  hasCommittedSourceReplyDeliveryEvidence,
   hasCompletedSourceReplyDeliveryEvidence,
-  hasVisibleCommittedMessagingToolDeliveryEvidence,
   resolveExplicitFinalSourceReplyDeliveryEvidence,
   resolveSourceReplyDelivery,
 } from "../../agents/embedded-agent-runner/delivery-evidence.js";
@@ -18,6 +16,7 @@ import {
 } from "../../agents/reply-completion.js";
 import { buildAgentRuntimeDeliveryPlan } from "../../agents/runtime-plan/build.js";
 import { listSessionFollowupCompletions } from "../../agents/subagents/completion/session-followup-completion.js";
+import type { SessionDeliveryGeneration } from "../../config/sessions/session-delivery-generation.types.js";
 import { logVerbose } from "../../globals.js";
 import { defaultRuntime } from "../../runtime.js";
 import { sessionDeliveryChannel } from "../../utils/delivery-context.read.js";
@@ -26,6 +25,7 @@ import {
   getReplyPayloadMetadata,
   isReplyPayloadTerminalContent,
   markReplyPayloadForSourceSuppressionDelivery,
+  selectAutomationReplyPayloads,
 } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
 import {
@@ -42,10 +42,13 @@ import { appendUsageLine, resolveResponseUsageLine } from "./agent-runner-usage-
 import {
   resolveAutomationReplyState,
   retainAutomationReasoningWithFinal,
-  selectAutomationReplyPayloads,
 } from "./automation-reply-payloads.js";
 import { deliverBlockReply } from "./block-reply-delivery.js";
-import { resolveFollowupDeliveryPayloads } from "./followup-delivery-payloads.js";
+import {
+  resolveFollowupDeliveryPayloads,
+  resolveFollowupPayloadContext,
+} from "./followup-delivery-payloads.js";
+import { createFollowupSpeechPreparer } from "./followup-delivery-tts.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
 import { warnPrivateMessageToolFinal } from "./private-message-tool-final.js";
@@ -65,7 +68,7 @@ import { resolveStrandedReplyRecovery } from "./stranded-reply-recovery.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import {
   attachWaitingStatusProgressContinuation,
-  buildWaitingStatusPayload,
+  buildQueuedWaitingStatusPayload,
 } from "./waiting-status.js";
 
 type FollowupDeliveryDecision =
@@ -84,19 +87,6 @@ type FollowupDeliveryDecision =
       finalTextLength: number;
       resolved: { provider: string; model: string };
     };
-
-function resolveFollowupPayloadContext(turn: AdmittedFollowupTurn) {
-  return {
-    cfg: turn.config,
-    messageProvider: turn.queued.run.messageProvider,
-    originatingAccountId: turn.queued.originatingAccountId ?? turn.queued.run.agentAccountId,
-    originatingChannel: turn.queued.originatingChannel,
-    originatingChatType: turn.queued.originatingChatType,
-    originatingReplyToMode: turn.queued.originatingReplyToMode,
-    originatingTo: turn.queued.originatingTo,
-    originatingThreadId: turn.queued.originatingThreadId,
-  };
-}
 
 /** Resolves one final queued delivery action without performing transport I/O. */
 export async function resolveFollowupDeliveryDecision(params: {
@@ -129,6 +119,7 @@ export async function resolveFollowupDeliveryDecision(params: {
   }
   const sourcePolicy = resolveSourceReplyVisibilityPolicy({
     cfg: turn.config,
+    scheduledAutomation: turn.queued.run.scheduledAutomation !== undefined,
     ctx: {
       ChatType: turn.queued.originatingChatType ?? turn.queued.run.chatType,
       InboundEventKind: turn.queued.currentInboundEventKind,
@@ -141,7 +132,10 @@ export async function resolveFollowupDeliveryDecision(params: {
   const terminalReplyExpectation = resolveFollowupReplyExpectation(turn.queued, turn.config);
   const isInteractive =
     isRequiredReplyExpectation(terminalReplyExpectation) ||
-    (!isSyntheticSourceReplyTurn({ inputProvenance: turn.queued.run.inputProvenance }) &&
+    (!isSyntheticSourceReplyTurn({
+      inputProvenance: turn.queued.run.inputProvenance,
+      scheduledAutomation: turn.queued.run.scheduledAutomation !== undefined,
+    }) &&
       !isInternalMessageChannel(
         turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
       ) &&
@@ -220,6 +214,7 @@ export async function resolveFollowupDeliveryDecision(params: {
   const terminalRunFailed = execution.outcome.status === "failed";
   const missingReplyNoticeAllowed = shouldDeliverMissingReplyNotice({
     ...turn.queued.run,
+    scheduledAutomation: turn.queued.run.scheduledAutomation !== undefined,
     terminalReplyExpectation,
     trigger: turn.queued.run.internalEventExecution ? "event" : "user",
     currentInboundEventKind: turn.queued.currentInboundEventKind,
@@ -308,7 +303,6 @@ export async function resolveFollowupDeliveryDecision(params: {
           sourceReplyDeliveryMode: sourcePolicy.sourceReplyDeliveryMode,
           sendPolicyDenied: sourcePolicy.sendPolicyDenied,
           successfulSourceReplyDelivery: completedSourceDelivery,
-          isHeartbeat: false,
           isRoomEvent: false,
         });
   if (recovery.kind === "retry") {
@@ -338,27 +332,13 @@ export async function resolveFollowupDeliveryDecision(params: {
     turn.operation.fail("run_failed", new Error(MISSING_REPLY_NOTICE_TEXT));
     opts?.onAgentRunTerminalOutcome?.("failed");
   }
-  const waitingStatusParams = {
-    completion:
-      peerFollowups.length > 0 ? resolveReplyCompletion("required", "pending") : completion,
-    continuationPending: result.meta?.continuationPending === true || peerFollowups.length > 0,
-    peerContinuation: peerFollowups.length > 0,
-    mediaContinuation:
-      result.meta?.continuationPending === true &&
-      !hasCompletionMessageSessionSpawn(result.acceptedSessionSpawns),
-    yielded: result.meta?.yielded === true,
-    yieldAcknowledgment: result.meta?.yieldAcknowledgment,
-    // Child spawns are side effects, not user-visible messages. They must not
-    // suppress the explicit waiting reply for the parent turn.
-    hasVisibleMessageDelivery:
-      peerFollowups.length === 0 &&
-      (hasCommittedSourceReplyDeliveryEvidence(result) ||
-        hasVisibleCommittedMessagingToolDeliveryEvidence(result) ||
-        result.didSendDeterministicApprovalPrompt === true),
-  };
   const waitingStatusPayload = terminalRunFailed
     ? undefined
-    : buildWaitingStatusPayload(waitingStatusParams);
+    : buildQueuedWaitingStatusPayload({
+        result,
+        completion,
+        peerContinuation: peerFollowups.length > 0,
+      });
   const fallbackPayload = terminalRunFailed
     ? accounting.terminalFailurePayload &&
       isInteractive &&
@@ -564,7 +544,6 @@ export async function deliverFollowupDecision(params: {
   const typing = createTypingSignaler({
     typing: defaults.typing,
     mode: defaults.typingMode,
-    isHeartbeat: false,
   });
   const crossChannelFailures: ReplyPayload[] = [];
   const queuedPayloads: ReplyPayload[] = [];
@@ -591,7 +570,25 @@ export async function deliverFollowupDecision(params: {
   const origin = resolveOriginMessageProvider({ originatingChannel });
   const sameChannelOrigin = Boolean(origin && origin === provider);
   const crossChannelOrigin = Boolean(origin && provider && origin !== provider);
-  for (const payload of payloads) {
+  const prepareSpeech = createFollowupSpeechPreparer({ turn, defaults, kind });
+  // The operation holds lifecycle admission until queue handoff. Retain its
+  // current generation so recovery cannot adopt a later reset's session.
+  const entry = turn.session.current();
+  const sessionGeneration: SessionDeliveryGeneration | undefined =
+    turn.session.kind === "session" && turn.session.storePath && entry
+      ? {
+          agentId: resolveSessionAgentId({
+            sessionKey: turn.session.key,
+            config: turn.config,
+            fallbackAgentId: turn.queued.run.agentId,
+          }),
+          storePath: turn.session.storePath,
+          sessionKey: turn.session.key,
+          sessionId: entry.sessionId,
+          lifecycleRevision: entry.lifecycleRevision ?? null,
+        }
+      : undefined;
+  for (let payload of payloads) {
     const providerRoute = deliveryPlan.resolveFollowupRoute({
       payload,
       originatingChannel,
@@ -622,6 +619,13 @@ export async function deliverFollowupDecision(params: {
       }
     }
     await typing.signalTextDelta(payload.text);
+    // The stalled recovery owner delivers its terminal notice after the operation aborts.
+    if (
+      turn.queued.stalledTurnRecovery !== true ||
+      !isReplyOperationStalledBeforeOutput(turn.operation)
+    ) {
+      payload = await prepareSpeech(payload, route);
+    }
     if (route !== "origin") {
       await dispatchPayload(payload);
     } else if (isRoutableChannel(originatingChannel) && originatingTo) {
@@ -632,6 +636,7 @@ export async function deliverFollowupDecision(params: {
         to: originatingTo,
         agentId: turn.queued.run.agentId,
         sessionKey: turn.queued.run.sessionKey,
+        sessionGeneration,
         accountId: turn.queued.originatingAccountId,
         requesterSenderId: turn.queued.run.senderId,
         requesterSenderName: turn.queued.run.senderName,

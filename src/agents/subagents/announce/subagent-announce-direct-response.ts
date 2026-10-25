@@ -94,6 +94,10 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
 
     const directAnnounceResult = getGatewayAgentResult(directAnnounceResponse);
     const directAnnounceRecord = asOptionalRecord(directAnnounceResponse);
+    const effectiveReplyExpectation =
+      directAnnounceResult?.meta?.terminalReplyExpectation === "result-required"
+        ? "result-required"
+        : replyExpectation;
     if (parentOnly) {
       return resolvePrivateCompletionDeliveryResult(
         directAnnounceRecord,
@@ -123,25 +127,34 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
         requireTerminalContent: true,
       }),
     );
-    // Only a completed external turn may satisfy its reply obligation with silence.
     const requesterCompletedSuccessfully =
       directAnnounceRecord?.status === "ok" &&
       !directAnnounceResult?.meta?.error &&
       !directAnnounceResult?.meta?.aborted;
+    const optionalSettleCompletedWithoutReply =
+      params.sourceTool === "subagent_settle" &&
+      replyExpectation === "optional" &&
+      requesterCompletedSuccessfully &&
+      !hasVisibleNonSilentGatewayPayload &&
+      directAnnounceResult?.meta?.yielded !== true &&
+      directAnnounceResult?.meta?.continuationPending !== true;
+    const requiresSettleReply =
+      params.sourceTool === "subagent_settle" && !optionalSettleCompletedWithoutReply;
     const acceptsIntentionalSilentCompletion =
-      // Peer handoffs explicitly owe a visible reply; child settlement keeps
+      // Peer handoffs explicitly owe a visible reply; optional settlement keeps
       // the external conversation's existing intentional-silence policy.
       !(params.requireVisibleReply && params.sourceTool === "sessions_send") &&
-      replyExpectation !== "result-required" &&
+      effectiveReplyExpectation !== "result-required" &&
+      !requiresSettleReply &&
       requesterCompletedSuccessfully &&
       hasIntentionalSilentCompletionReply &&
       directAnnounceResult?.meta?.yielded !== true &&
       directAnnounceResult?.meta?.continuationPending !== true;
-    const requiresSettleReply =
-      params.sourceTool === "subagent_settle" && !acceptsIntentionalSilentCompletion;
     const requiresAutomaticFinalReceipt =
       shouldDeliverAgentFinal &&
-      (params.expectsCompletionMessage || params.requireVisibleReply || requiresSettleReply);
+      (params.expectsCompletionMessage ||
+        params.requireVisibleReply ||
+        params.sourceTool === "subagent_settle");
     const automaticEvidence = getAutomaticDeliveryEvidence(directAnnounceResult ?? {});
     const directDeliveryFailure =
       (shouldDeliverAgentFinal || requiresMessageToolDelivery) && directAnnounceResult
@@ -292,7 +305,7 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
         !hasVisibleCompletionReply &&
         !acceptsIntentionalSilentCompletion &&
         (params.requireVisibleReply ||
-          replyExpectation === "result-required" ||
+          effectiveReplyExpectation === "result-required" ||
           requiresSettleReply ||
           (params.expectsCompletionMessage &&
             (shouldDeliverAgentFinal ||
