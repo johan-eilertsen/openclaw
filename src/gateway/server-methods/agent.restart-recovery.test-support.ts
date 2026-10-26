@@ -15,7 +15,6 @@ import {
   invokeAgent,
   makeContext,
   requireValue,
-  waitForAssertion,
 } from "./agent.test-harness.js";
 import { handleChatAbortRequest } from "./chat-abort-handler.js";
 import { handleDirectExternalChatSend } from "./chat-send-external-entry.js";
@@ -56,6 +55,10 @@ export function registerAgentQueuedRestartRecoveryTests() {
         );
         const active = requireValue(rpcSourceTesting.get(runId), "queued recovery source missing");
 
+        const abortObserved = createDeferred();
+        active.input.abortSignal.addEventListener("abort", () => abortObserved.resolve(), {
+          once: true,
+        });
         const cancelOptions = { context, client: null, isWebchatConnect: () => false };
         if (cause === "rpc") {
           cancellation = handleChatAbortRequest({
@@ -83,10 +86,10 @@ export function registerAgentQueuedRestartRecoveryTests() {
                 : createAgentRunDirectAbortError(),
           });
         }
-        void cancellation.catch(() => {});
-        await waitForAssertion(() => {
-          expect(active.input.abortSignal.aborted).toBe(true);
-        });
+        // Stop reads durable retry state; advancing fake time cannot settle that worker I/O.
+        // A completed cancellation without an abort must still fail before dispatch is released.
+        await Promise.race([abortObserved.promise, cancellation]);
+        expect(active.input.abortSignal.aborted).toBe(true);
         dispatchGate.resolve();
         await cancellation;
         await active.input.settlement.promise;
