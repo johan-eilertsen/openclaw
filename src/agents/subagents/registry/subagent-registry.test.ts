@@ -1887,6 +1887,7 @@ describe("subagent registry seam flow", () => {
 
   it("suppresses stale timeout announces when the same child run later finishes successfully", async () => {
     mockPendingAgentWait();
+    mocks.persistRegistryRows.mockImplementation(saveSubagentRegistryChangesToSqlite);
 
     const { operation, releaseExecution } = holdChildExecution(
       "run-timeout-then-ok",
@@ -1900,8 +1901,6 @@ describe("subagent registry seam flow", () => {
         expectsCompletionMessage: true,
       });
 
-      const lifecycleHandler = getLifecycleHandler();
-
       await settleLifecycle({
         runId: "run-timeout-then-ok",
         stream: "lifecycle",
@@ -1914,19 +1913,16 @@ describe("subagent registry seam flow", () => {
 
       expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
 
-      lifecycleHandler?.({
-        runId: "run-timeout-then-ok",
-        stream: "lifecycle",
-        data: {
-          phase: "end",
-          endedAt: 1_250,
-          terminalReply: { disposition: "visible", text: "Finished successfully." },
-        },
+      emitLifecycle("run-timeout-then-ok", {
+        phase: "end",
+        endedAt: 1_250,
+        terminalReply: { disposition: "visible", text: "Finished successfully." },
       });
       await waitForFast(() => {
-        expect(findRequesterRun("run-timeout-then-ok")).toMatchObject({
+        expect(loadSubagentRegistryFromSqlite().get("run-timeout-then-ok")).toMatchObject({
           execution: { outcome: { status: "ok", endedAt: 1_250 } },
           completion: {
+            resultText: "Finished successfully.",
             terminalReply: { disposition: "visible", text: "Finished successfully." },
           },
         });
@@ -1942,6 +1938,7 @@ describe("subagent registry seam flow", () => {
         expect.objectContaining({
           childRunId: "run-timeout-then-ok",
           outcome: expect.objectContaining({ status: "ok", endedAt: 1_250 }),
+          terminalReply: { disposition: "visible", text: "Finished successfully." },
         }),
       );
 
