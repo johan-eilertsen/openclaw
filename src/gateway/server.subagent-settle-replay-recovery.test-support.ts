@@ -593,20 +593,29 @@ export async function runPublicSettleRecoveryCase(
     // Restart removed the old Gateway's dedupe cache. The already-admitted
     // settle batch must recognize its completed successor instead of rerunning.
     const completedReplay = wake(sibling);
-    expect(await completedReplay.result).toBe(true);
+    expect(await completedReplay.result).toBe(visibleFinal);
     expect(agentCommandMock).toHaveBeenCalledTimes(2);
     const pendingWake = readWake();
-    expect(pendingWake).toBeUndefined();
-    expect(completedReplay.completeBatch).toHaveBeenCalledOnce();
-    expect(completedReplay.completeBatch.mock.calls[0]?.[2]).toMatchObject({
-      delivered: true,
-    });
-    expect(completedReplay.completeBatch.mock.calls[0]?.[2]?.requesterVisibleFinalDelivered).toBe(
-      visibleFinal && reply !== "child visible final" && !privateChild ? true : undefined,
-    );
     if (visibleFinal) {
+      expect(pendingWake).toBeUndefined();
+      expect(completedReplay.completeBatch).toHaveBeenCalledOnce();
+      expect(completedReplay.completeBatch.mock.calls[0]?.[2]).toMatchObject({
+        delivered: true,
+      });
+      expect(completedReplay.completeBatch.mock.calls[0]?.[2]?.requesterVisibleFinalDelivered).toBe(
+        reply !== "child visible final" && !privateChild ? true : undefined,
+      );
       return;
     }
+    // Commentary is not the yielded requester's final. Keep its existing retry
+    // pending without immediately replaying the recovered command.
+    expect(completedReplay.completeBatch).not.toHaveBeenCalled();
+    expect(pendingWake).toMatchObject({
+      status: "pending",
+      attemptCount: 1,
+      nextAttemptAt: expect.any(Number),
+      lastError: "completion agent did not produce a visible reply",
+    });
     expect(
       loadSessionEntryReadOnly(scope)?.restartRecoveryTerminalDeliveryEvidence?.find(
         (evidence) => evidence.runId === runId,
@@ -618,6 +627,7 @@ export async function runPublicSettleRecoveryCase(
       transcriptRunId: recoveryRunId,
     });
     expect(await wake(sibling).result).toBe(false);
+    expect(readWake()?.nextAttemptAt).toBe(pendingWake?.nextAttemptAt);
     expect(agentCommandMock).toHaveBeenCalledTimes(2);
   } finally {
     release();

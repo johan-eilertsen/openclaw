@@ -142,7 +142,9 @@ async function startPublicCase(
             });
           if (mode === "fallback") {
             send(marker);
-            if (fault === "duplicate-result") send(marker);
+            if (fault === "duplicate-result") {
+              send(marker);
+            }
           }
           if (fault === "raw-child") {
             send("QA-SUBAGENT-TERMINAL-VISIBLE-OK");

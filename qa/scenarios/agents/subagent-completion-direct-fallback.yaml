@@ -659,7 +659,7 @@ flow:
                         readNativeQaSubagentRuns(env).then(runs => ({ runs })).catch(error => ({ runs: [], captureError: String(error) }))
                       ]);
                       const phaseRequests = requests.filter(request => request.cursor > activeRequestCursor);
-                      const selectedRequests = [...new Map([...requests.slice(0, 4), ...phaseRequests.slice(0, 2), ...requests.slice(-2)].map(request => [request.cursor, request])).values()];
+                      const selectedRequests = [...new Map([...requests.slice(0, 4), ...phaseRequests.slice(0, 8), ...requests.slice(-2)].map(request => [request.cursor, request])).values()];
                       const selected = snapshotTerminalRequests(selectedRequests);
                       const runs = (runList.runs ?? []).slice(0, 20).map(run => ({
                         runId: run.runId, label: run.label, execution: run.execution, delivery: run.delivery,

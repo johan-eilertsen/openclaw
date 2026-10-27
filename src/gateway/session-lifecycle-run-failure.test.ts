@@ -219,6 +219,10 @@ describe("durable pre-reply run failure", () => {
               ...target,
               runId: attemptRunId,
               messageChannel: "internal",
+              // Ordinary settled wakes may be quiet; this case requires a
+              // private result whose failure must not fail the prior user run.
+              terminalReplyExpectation: "result-required",
+              privateCompletion: true,
               inputProvenance: {
                 kind: "inter_session",
                 sourceTool: "subagent_settle",

@@ -77,6 +77,9 @@ flow:
               expr: config.completionModes
             item: completionMode
             actions:
+              - set: priorEmptyRunIds
+                value:
+                  expr: "(await readNativeQaSubagentRuns(env)).map((run) => run.runId)"
               - set: readEmptyRun
                 value:
                   lambda:
@@ -84,9 +87,6 @@ flow:
                       - runId
                     async: true
                     expr: "(await readNativeQaSubagentRuns(env)).find((run) => run.label === 'qa-terminal-empty' && (runId ? run.runId === runId : !priorEmptyRunIds.includes(run.runId)))"
-              - set: priorEmptyRunIds
-                value:
-                  expr: "(await readNativeQaSubagentRuns(env)).map((run) => run.runId)"
               - set: startIndex
                 value:
                   expr: "state.getSnapshot().messages.length"
