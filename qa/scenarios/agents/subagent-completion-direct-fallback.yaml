@@ -1,4 +1,4 @@
-title: Quiet child completions and yielded requester replies
+title: Subagent direct fallback, quiet completions, and yielded replies
 
 scenario:
   id: subagent-completion-direct-fallback
@@ -9,7 +9,7 @@ scenario:
     secondary:
       - agent-runtime.subagent-turns-subagents
       - channels.qa-channel-final-reply
-  objective: Prove ordinary child completions stay quiet while a deliberately yielded requester gets one consolidated final reply, including tool-free recovery and restart safety.
+  objective: Prove visible unsent parent output uses direct fallback, ordinary parent silence stays quiet, and a deliberately yielded requester gets one consolidated final reply, with sanitization and restart safety.
   gatewayConfigPatch:
     tools:
       alsoAllow:
@@ -21,10 +21,11 @@ scenario:
             alsoAllow:
               - message
   successCriteria:
-    - An ordinary child completion stays quiet after the requester has already received its parent acknowledgement.
-    - A deliberately yielded requester receives one consolidated parent reply after silent or empty settlement output, with tools disabled during recovery.
-    - Gateway restart does not replay prior terminal payloads or synthesize interruption notices for already-settled handoffs, and a post-restart completion is delivered exactly once.
-    - Raw child output, protected internal metadata, and direct child-result delivery receipts never reach the channel.
+    - Visible but unsent parent completions trigger exact-once direct fallback with protected internal metadata stripped.
+    - Exact worker NO_REPLY stays private while a non-yielded parent explicitly reports missing child output visibly exactly once.
+    - An ordinary empty parent completion stays quiet after the requester has already received its parent acknowledgement.
+    - A deliberately yielded requester receives one consolidated parent reply after silent or empty settlement output, with tools disabled during recovery and no direct child-result fallback.
+    - Gateway restart does not replay prior terminal payloads or synthesize interruption notices for already-settled handoffs, and a post-restart direct fallback is delivered exactly once.
     - A private parent consumes a child-only nonce and media reference, spawns a second child with messaging denied, records its reviewed outcome internally, and does not send or replay either result on the channel.
   docsRefs:
     - docs/tools/subagents.md
@@ -45,18 +46,42 @@ scenario:
       requiredProviderMode: mock-openai
       cases:
         - name: visible
+          mode: fallback
           marker: QA-SUBAGENT-TERMINAL-VISIBLE-OK
-          yielded: false
-          expectedSendCount: 0
+          expectedSendCount: 1
+          expectedFallbackReceiptCount: 1
+          expectedMessageCount: 0
         - name: silent
-          marker: "Reviewed worker result: QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED"
-          yielded: true
+          mode: fallback
+          marker: QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED
           expectedSendCount: 1
+          expectedFallbackReceiptCount: 0
+          expectedMessageCount: 1
         - name: fallback
-          marker: "Reviewed worker result: QA-SUBAGENT-TERMINAL-FALLBACK-OK"
-          yielded: true
+          mode: fallback
+          marker: QA-SUBAGENT-TERMINAL-FALLBACK-OK
           expectedSendCount: 1
-      restartMarker: "Reviewed worker result: QA-SUBAGENT-TERMINAL-RESTART-OK"
+          expectedFallbackReceiptCount: 1
+          expectedMessageCount: 0
+        - name: visible
+          mode: quiet
+          marker: QA-SUBAGENT-TERMINAL-VISIBLE-OK
+          expectedSendCount: 0
+          expectedFallbackReceiptCount: 0
+          expectedMessageCount: 0
+        - name: silent
+          mode: yielded
+          marker: "Reviewed worker result: QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED"
+          expectedSendCount: 1
+          expectedFallbackReceiptCount: 0
+          expectedMessageCount: 0
+        - name: fallback
+          mode: yielded
+          marker: "Reviewed worker result: QA-SUBAGENT-TERMINAL-FALLBACK-OK"
+          expectedSendCount: 1
+          expectedFallbackReceiptCount: 0
+          expectedMessageCount: 0
+      restartMarker: QA-SUBAGENT-TERMINAL-RESTART-OK
       settledToolRetryNeedle: "Do not repeat completed tool calls or restart from scratch. Do not call tools in this step."
       metadataSentinel: QA-SUBAGENT-TERMINAL-INTERNAL-MUST-NOT-LEAK
       parentAcknowledgment: Worker started.
@@ -144,10 +169,11 @@ flow:
                   lambda:
                     params:
                       - caseName
+                      - priorRunIds
                     async: true
-                    expr: "(await readNativeQaSubagentRuns(env)).find((run) => run.label === `qa-terminal-${caseName}` && run.execution.status === 'terminal' && run.execution.outcome?.status === 'ok' && run.delivery?.status === 'delivered')"
-              # Raw child delivery is forbidden even when its text looks like a useful answer.
-              # Check the owner's destination history receipt as well as channel payloads.
+                    expr: "(await readNativeQaSubagentRuns(env)).find((run) => !(priorRunIds ?? []).includes(run.runId) && run.label === `qa-terminal-${caseName}` && run.execution.status === 'terminal' && run.execution.outcome?.status === 'ok' && run.delivery?.status === 'delivered')"
+              # Direct fallback must record the exact child's native receipt; quiet and
+              # yielded controls must not use that path even when output text looks similar.
               - set: readDirectFallbackReceipts
                 value:
                   lambda:
@@ -162,7 +188,7 @@ flow:
                   actions:
                     - set: activePhase
                       value:
-                        expr: "`public:${terminalCase.name}`"
+                        expr: "`public:${terminalCase.mode}:${terminalCase.name}`"
                     - set: startIndex
                       value:
                         expr: state.getSnapshot().messages.length
@@ -172,9 +198,12 @@ flow:
                     - set: activeRequestCursor
                       value:
                         ref: requestCursor
+                    - set: priorCaseRunIds
+                      value:
+                        expr: "(await readNativeQaSubagentRuns(env)).map((run) => run.runId)"
                     - set: conversationId
                       value:
-                        expr: "`terminal-${terminalCase.name}-${randomUUID().slice(0, 8)}`"
+                        expr: "`terminal-${terminalCase.mode}-${terminalCase.name}-${randomUUID().slice(0, 8)}`"
                     - sendInbound:
                         accountId: default
                         conversation:
@@ -185,9 +214,9 @@ flow:
                           ref: conversationId
                         senderName: QA Terminal Reply Operator
                         text:
-                          expr: "`Subagent terminal reply QA check: ${terminalCase.name}. Spawn one native worker, then ${terminalCase.yielded ? 'yield until the worker finishes' : 'finish the parent turn without waiting'}. Do not use ACP.`"
-                    # Quiet completion must still wait for the original acknowledgement;
-                    # a yielded requester is complete only when its consolidated final is visible.
+                          expr: "`Subagent terminal reply QA check: ${terminalCase.name}. Spawn one native worker, then ${(terminalCase.mode === 'yielded') ? 'yield until the worker finishes' : 'finish the parent turn without waiting'}. ${terminalCase.mode === 'quiet' ? 'Keep ordinary completion quiet. ' : ''}Do not use ACP.`"
+                    # Visible unsent parent text requires direct fallback; ordinary silence
+                    # stays quiet. Each non-yielded control must also observe its initial ACK.
                     - call: waitForCondition
                       saveAs: terminalRun
                       args:
@@ -196,10 +225,11 @@ flow:
                             expr: |
                               (async () => {
                                 await env.mock?.terminalRequesters?.settle(env.gateway);
-                                const run = await readSettledTerminalRun(terminalCase.name);
+                                const run = await readSettledTerminalRun(terminalCase.name, priorCaseRunIds);
                                 if (!run) return undefined;
+                                if (terminalCase.expectedFallbackReceiptCount > 0 && (await readDirectFallbackReceipts(run)).length === 0) return undefined;
                                 const outbound = state.getSnapshot().messages.slice(startIndex).filter((candidate) => candidate.direction === 'outbound' && candidate.conversation.id === conversationId);
-                                if (!terminalCase.yielded && !outbound.some((candidate) => !candidate.deleted && String(candidate.text ?? '').trim() === config.parentAcknowledgment)) return undefined;
+                                if (!(terminalCase.mode === 'yielded') && !outbound.some((candidate) => !candidate.deleted && String(candidate.text ?? '').trim() === config.parentAcknowledgment)) return undefined;
                                 const matchingCount = outbound.filter((candidate) => String(candidate.text ?? '').trim() === terminalCase.marker).length;
                                 return terminalCase.expectedSendCount === 0 || matchingCount >= terminalCase.expectedSendCount ? run : undefined;
                               })().catch(() => undefined)
@@ -221,22 +251,22 @@ flow:
                       value:
                         expr: "await readDirectFallbackReceipts(terminalRun)"
                     - assert:
-                        expr: "directFallbackReceipts.length === 0"
+                        expr: "directFallbackReceipts.length === terminalCase.expectedFallbackReceiptCount && directFallbackReceipts.every((message) => message.content.filter((block) => block.type === 'text').map((block) => block.text).join('') === terminalCase.marker)"
                         message:
-                          expr: "`terminal ${terminalCase.name}: raw child result used direct fallback: ${JSON.stringify(directFallbackReceipts)}`"
+                          expr: "`terminal ${terminalCase.name}: unexpected direct-fallback receipt: ${JSON.stringify(directFallbackReceipts)}`"
                     - assert:
-                        expr: "caseOutbound.filter((message) => !message.deleted && String(message.text ?? '').trim() === config.parentAcknowledgment).length === (terminalCase.yielded ? 0 : 1)"
+                        expr: "caseOutbound.filter((message) => !message.deleted && String(message.text ?? '').trim() === config.parentAcknowledgment).length === ((terminalCase.mode === 'yielded') ? 0 : 1)"
                         message:
                           expr: "`terminal ${terminalCase.name}: spawning parent did not acknowledge its completed turn`"
                     - set: appendDirectFallbackProof
                       value:
-                        expr: "completionProofs.push({ case: terminalCase.name, runId: terminalRun.runId, receiptKeys: directFallbackReceipts.map((message) => message.__openclaw.idempotencyKey) })"
+                        expr: "completionProofs.push({ case: terminalCase.name, mode: terminalCase.mode, runId: terminalRun.runId, receiptKeys: directFallbackReceipts.map((message) => message.__openclaw.idempotencyKey) })"
                     - assert:
                         expr: "matchingOutbound.length === terminalCase.expectedSendCount"
                         message:
                           expr: "`terminal ${terminalCase.name}: expected ${terminalCase.expectedSendCount} outbound, got ${matchingOutbound.length}; messages=${JSON.stringify(state.getSnapshot().messages.slice(-10))} requests=${JSON.stringify(caseRequests)} logs=${JSON.stringify((env.gateway.logs?.().split('\\n') ?? []).filter((line) => /qa-channel|subagent|announce|completion|requester/i.test(line)).slice(-30))}`"
                     - assert:
-                        expr: "caseOutbound.filter((candidate) => !candidate.deleted && String(candidate.text ?? '').trim()).every((candidate) => String(candidate.text ?? '').trim() === (terminalCase.yielded ? terminalCase.marker : config.parentAcknowledgment) || (transport.id === 'crabline' && transport.requiredPluginIds.includes('telegram') && config.parentProgressTexts.includes(String(candidate.text ?? '').trim())))"
+                        expr: "caseOutbound.filter((candidate) => !candidate.deleted && String(candidate.text ?? '').trim()).every((candidate) => ((terminalCase.mode !== 'yielded' && String(candidate.text ?? '').trim() === config.parentAcknowledgment) || (terminalCase.expectedSendCount > 0 && String(candidate.text ?? '').trim() === terminalCase.marker)) || (transport.id === 'crabline' && transport.requiredPluginIds.includes('telegram') && config.parentProgressTexts.includes(String(candidate.text ?? '').trim())))"
                         message:
                           expr: "`terminal ${terminalCase.name}: unexpected completion text or raw child output; outbound=${recentOutboundSummary(state)}`"
                     - assert:
@@ -262,7 +292,7 @@ flow:
                       value:
                         expr: "parentRequests.filter((request) => String(request.prompt ?? '').includes(config.settledToolRetryNeedle))"
                     - assert:
-                        expr: "parentFinalizationRequests.length === (terminalCase.yielded ? 1 : 0) && parentFinalizationRequests.every((request) => !Array.isArray(request.body?.tools) || request.body.tools.length === 0)"
+                        expr: "parentFinalizationRequests.length === ((terminalCase.mode === 'yielded') ? 1 : 0) && parentFinalizationRequests.every((request) => !Array.isArray(request.body?.tools) || request.body.tools.length === 0)"
                         message:
                           expr: "`terminal ${terminalCase.name}: incorrect tool-free requester finalization: ${JSON.stringify(parentFinalizationRequests)}`"
                     - assert:
@@ -270,7 +300,7 @@ flow:
                         message:
                           expr: "`terminal ${terminalCase.name}: sessions_spawn not observed; requests=${JSON.stringify(caseRequests)}`"
                     - assert:
-                        expr: "caseRequests.filter((request) => request.plannedToolName === 'sessions_yield').length === (terminalCase.yielded ? 1 : 0) && !caseRequests.some((request) => request.plannedToolName === 'message')"
+                        expr: "caseRequests.filter((request) => request.plannedToolName === 'sessions_yield').length === ((terminalCase.mode === 'yielded') ? 1 : 0) && caseRequests.filter((request) => request.plannedToolName === 'message').length === terminalCase.expectedMessageCount"
                         message:
                           expr: "`terminal ${terminalCase.name}: parent did not preserve its deliberate yield or repeated delivery work; requests=${JSON.stringify(caseRequests)}`"
                     - assert:
@@ -279,7 +309,7 @@ flow:
                           expr: "`terminal ${terminalCase.name}: native lifecycle did not settle authoritatively; run=${JSON.stringify(terminalRun)}`"
                     - set: appendVerdict
                       value:
-                        expr: "verdicts.push({ case: terminalCase.name, conversationId, runId: terminalRun.runId, deliveryStatus: terminalRun.delivery?.status, inputDisposition: terminalCase.name, representation: terminalCase.yielded ? 'consolidated parent final after tool-free recovery' : 'quiet ordinary completion', restart: false, yielded: terminalCase.yielded, parentFinalizationCount: parentFinalizationRequests.length, expectedTerminalSendCount: terminalCase.expectedSendCount, actualTerminalSendCount: matchingOutbound.length, capturedTerminalPayloads: matchingOutbound.map((message) => String(message.text ?? '')), auxiliaryChannelEvents: caseOutbound.filter((message) => !matchingOutbound.includes(message)).map((message) => String(message.text ?? '')), silenceTokenLeaked: caseOutbound.some((message) => String(message.text ?? '').trim() === 'NO_REPLY'), internalMetadataLeak: caseOutbound.some((message) => String(message.text ?? '').includes(config.metadataSentinel)), pass: true })"
+                        expr: "verdicts.push({ case: terminalCase.name, conversationId, runId: terminalRun.runId, deliveryStatus: terminalRun.delivery?.status, inputDisposition: terminalCase.name, representation: (terminalCase.mode === 'yielded') ? 'consolidated parent final after tool-free recovery' : terminalCase.mode === 'quiet' ? 'quiet ordinary completion' : 'visible-unsent parent completion fallback or explicit report', restart: false, mode: terminalCase.mode, parentFinalizationCount: parentFinalizationRequests.length, expectedTerminalSendCount: terminalCase.expectedSendCount, actualTerminalSendCount: matchingOutbound.length, capturedTerminalPayloads: matchingOutbound.map((message) => String(message.text ?? '')), auxiliaryChannelEvents: caseOutbound.filter((message) => !matchingOutbound.includes(message)).map((message) => String(message.text ?? '')), silenceTokenLeaked: caseOutbound.some((message) => String(message.text ?? '').trim() === 'NO_REPLY'), internalMetadataLeak: caseOutbound.some((message) => String(message.text ?? '').includes(config.metadataSentinel)), pass: true })"
               # Denying outbound messaging must not disable the parent's orchestration tools.
               - set: activePhase
                 value: private-config
@@ -526,13 +556,13 @@ flow:
                   senderId:
                     ref: restartConversationId
                   senderName: QA Restart Operator
-                  text: "Subagent terminal reply QA check: restart. Spawn one native worker, then yield until the worker finishes. Do not use ACP."
+                  text: "Subagent terminal reply QA check: restart. Spawn one native worker, then finish the parent turn without waiting. Do not use ACP."
               - call: waitForCondition
                 saveAs: restartRun
                 args:
                   - lambda:
                       async: true
-                      expr: "(async () => { await env.mock?.terminalRequesters?.settle(env.gateway); const run = await readSettledTerminalRun('restart'); if (!run) return undefined; const delivered = state.getSnapshot().messages.slice(restartStartIndex).some((candidate) => candidate.direction === 'outbound' && candidate.conversation.id === restartConversationId && String(candidate.text ?? '').trim() === config.restartMarker); return delivered ? run : undefined; })().catch(() => undefined)"
+                      expr: "(async () => { await env.mock?.terminalRequesters?.settle(env.gateway); const run = await readSettledTerminalRun('restart'); if (!run || (await readDirectFallbackReceipts(run)).length === 0) return undefined; const delivered = state.getSnapshot().messages.slice(restartStartIndex).some((candidate) => candidate.direction === 'outbound' && candidate.conversation.id === restartConversationId && String(candidate.text ?? '').trim() === config.restartMarker); return delivered ? run : undefined; })().catch(() => undefined)"
                   - 60000
                   - 250
               - set: restartMatches
@@ -545,16 +575,16 @@ flow:
                 value:
                   expr: "restartRequests.filter((request) => request.sessionId === restartRequests.find((candidate) => candidate.plannedToolName === 'sessions_spawn')?.sessionId && String(request.prompt ?? '').includes(config.settledToolRetryNeedle))"
               - assert:
-                  expr: "restartRequests.filter((request) => request.plannedToolName === 'sessions_spawn').length === 1 && restartRequests.filter((request) => request.plannedToolName === 'sessions_yield').length === 1 && !restartRequests.some((request) => request.plannedToolName === 'message') && restartParentFinalizationRequests.length === 1 && restartParentFinalizationRequests.every((request) => !Array.isArray(request.body?.tools) || request.body.tools.length === 0)"
+                  expr: "restartRequests.filter((request) => request.plannedToolName === 'sessions_spawn').length === 1 && restartRequests.filter((request) => request.plannedToolName === 'sessions_yield').length === 0 && !restartRequests.some((request) => request.plannedToolName === 'message') && restartParentFinalizationRequests.length === 0"
                   message:
-                    expr: "`restart completion did not preserve one yield and one tool-free finalization: ${JSON.stringify(restartRequests)}`"
+                    expr: "`restart completion repeated work or used yielded recovery instead of direct fallback: ${JSON.stringify(restartRequests)}`"
               - set: restartFallbackReceipts
                 value:
                   expr: "await readDirectFallbackReceipts(restartRun)"
               - assert:
-                  expr: "restartFallbackReceipts.length === 0"
+                  expr: "restartFallbackReceipts.length === 1 && restartFallbackReceipts[0].content.filter((block) => block.type === 'text').map((block) => block.text).join('') === config.restartMarker"
                   message:
-                    expr: "`restart completion leaked the raw child through direct fallback: ${JSON.stringify(restartFallbackReceipts)}`"
+                    expr: "`restart completion did not use its exact direct-fallback owner: ${JSON.stringify(restartFallbackReceipts)}`"
               - set: appendRestartFallbackProof
                 value:
                   expr: "completionProofs.push({ case: 'restart', runId: restartRun.runId, receiptKeys: restartFallbackReceipts.map((message) => message.__openclaw.idempotencyKey) })"
@@ -604,9 +634,9 @@ flow:
                     expr: "`Gateway restart exposed a private result on a channel: ${JSON.stringify(privatePostRestartEvents)}`"
               - set: appendRestartVerdict
                 value:
-                  expr: "verdicts.push({ case: 'restart', conversationId: restartConversationId, runId: restartRun.runId, deliveryStatus: restartRun.delivery?.status, inputDisposition: 'empty-settled-requester', restart: true, yielded: true, preRestartTerminalMessageCount: preRestartTerminalPayloads.length, postRestartTerminalPayloadCount: postRestartTerminalPayloads.length, priorTerminalPayloadReplayCount: postRestartTerminalPayloads.length - preRestartTerminalPayloads.length, unexpectedPostRestartPayloadCount: postRestartUnexpectedPayloads.length, unexpectedPostRestartPayloads: postRestartUnexpectedPayloads.map((message) => message.text), expectedTerminalSendCount: 1, actualTerminalSendCount: restartMatches.length, capturedTerminalPayloads: restartMatches.map((message) => String(message.text ?? '')), silenceTokenLeaked: false, internalMetadataLeak: false, pass: true })"
+                  expr: "verdicts.push({ case: 'restart', conversationId: restartConversationId, runId: restartRun.runId, deliveryStatus: restartRun.delivery?.status, inputDisposition: 'visible-unsent-parent', restart: true, mode: 'fallback', preRestartTerminalMessageCount: preRestartTerminalPayloads.length, postRestartTerminalPayloadCount: postRestartTerminalPayloads.length, priorTerminalPayloadReplayCount: postRestartTerminalPayloads.length - preRestartTerminalPayloads.length, unexpectedPostRestartPayloadCount: postRestartUnexpectedPayloads.length, unexpectedPostRestartPayloads: postRestartUnexpectedPayloads.map((message) => message.text), expectedTerminalSendCount: 1, actualTerminalSendCount: restartMatches.length, capturedTerminalPayloads: restartMatches.map((message) => String(message.text ?? '')), silenceTokenLeaked: false, internalMetadataLeak: false, pass: true })"
               - assert:
-                  expr: "verdicts.length === 5 && verdicts.every((verdict) => verdict.pass === true)"
+                  expr: "verdicts.length === 8 && verdicts.every((verdict) => verdict.pass === true)"
                   message:
                     expr: "`terminal reply verdict matrix incomplete: ${JSON.stringify(verdicts)}`"
             catchAs: terminalFlowError

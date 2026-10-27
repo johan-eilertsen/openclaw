@@ -22,8 +22,14 @@ const flow = (selected: unknown[]) => ({ steps: [{ name: step.name, actions: sel
 async function startPublicCase(
   acknowledgments: number,
   initialAck: "missing" | "deleted" | "foreign" = "missing",
-  yielded = false,
-  fault?: "raw-child" | "raw-receipt" | "tools" | "repeat-spawn",
+  mode: "fallback" | "quiet" | "yielded" = "fallback",
+  fault?:
+    | "raw-child"
+    | "raw-receipt"
+    | "receipt-text"
+    | "duplicate-result"
+    | "tools"
+    | "repeat-spawn",
 ) {
   const publicIndex = actions.findIndex((action) => isRecord(action) && "forEach" in action);
   if (publicIndex < 0) {
@@ -33,6 +39,7 @@ async function startPublicCase(
   const observed = createDeferred<unknown>();
   const releaseParent = createDeferred<void>();
   const parentSent = createDeferred<void>();
+  const yielded = mode === "yielded";
   const caseName = yielded ? "fallback" : "visible";
   const marker = yielded
     ? "Reviewed worker result: QA-SUBAGENT-TERMINAL-FALLBACK-OK"
@@ -64,6 +71,7 @@ async function startPublicCase(
         ]
       : []),
   ];
+  let started = false;
   let parentSend: Promise<void> | undefined;
   const result = runLoadedScenarioFlow(scenario.id, {
     state,
@@ -75,10 +83,19 @@ async function startPublicCase(
     api: {
       fs,
       path,
-      readNativeQaSubagentRuns: async () => [run],
+      readNativeQaSubagentRuns: async () => (started ? [run] : []),
       config: {
         ...scenario.execution.config,
-        cases: [{ name: caseName, marker, yielded, expectedSendCount: yielded ? 1 : 0 }],
+        cases: [
+          {
+            name: caseName,
+            marker,
+            mode,
+            expectedSendCount: mode === "quiet" ? 0 : 1,
+            expectedFallbackReceiptCount: mode === "fallback" ? 1 : 0,
+            expectedMessageCount: 0,
+          },
+        ],
       },
       env: {
         providerMode: "mock-openai",
@@ -89,17 +106,21 @@ async function startPublicCase(
             if (method === "chat.history") {
               return {
                 messages:
-                  fault === "raw-receipt"
+                  mode === "fallback" || fault === "raw-receipt"
                     ? [
                         {
                           role: "assistant",
                           provider: "openclaw",
                           model: "automation-result",
                           __openclaw: {
-                            idempotencyKey:
-                              "outbound-delivery:announce:v1:child:run:text-direct:raw",
+                            idempotencyKey: "outbound-delivery:announce:v1:child:run:text-direct:0",
                           },
-                          content: [{ type: "text", text: marker }],
+                          content: [
+                            {
+                              type: "text",
+                              text: fault === "receipt-text" ? "Unrelated child output" : marker,
+                            },
+                          ],
                         },
                       ]
                     : [],
@@ -111,6 +132,7 @@ async function startPublicCase(
       },
       transport: {
         sendInbound: async (input: Parameters<typeof state.addInboundMessage>[0]) => {
+          started = true;
           const message = state.addInboundMessage(input);
           const send = (text: string, conversation = input.conversation.id) =>
             state.addOutboundMessage({
@@ -118,6 +140,10 @@ async function startPublicCase(
               to: `dm:${conversation}`,
               text,
             });
+          if (mode === "fallback") {
+            send(marker);
+            if (fault === "duplicate-result") send(marker);
+          }
           if (fault === "raw-child") {
             send("QA-SUBAGENT-TERMINAL-VISIBLE-OK");
           }
@@ -181,41 +207,47 @@ async function startPublicCase(
   };
 }
 
-describe("quiet completion scenario parent acknowledgment", () => {
-  it.each([
-    [1, "missing", undefined],
-    [1, "deleted", undefined],
-    [1, "foreign", undefined],
-    [0, "missing", "parent acknowledgment missing"],
-    [2, "missing", "spawning parent did not acknowledge"],
-  ] as const)("checks %i final acknowledgments after %s", async (count, initialAck, error) => {
-    const run = await startPublicCase(count, initialAck);
-    try {
-      expect(await run.observed).toBeUndefined();
-    } finally {
-      await run.release();
-    }
-    const outcome = await run.outcome;
-    if (error) {
-      expect(outcome).toHaveProperty("error");
-      if ("error" in outcome) {
-        expect(String(outcome.error)).toContain(error);
+describe.each(["fallback", "quiet"] as const)(
+  "%s completion scenario parent acknowledgment",
+  (mode) => {
+    it.each([
+      [1, "missing", undefined],
+      [1, "deleted", undefined],
+      [1, "foreign", undefined],
+      [0, "missing", "parent acknowledgment missing"],
+      [2, "missing", "spawning parent did not acknowledge"],
+    ] as const)("checks %i final acknowledgments after %s", async (count, initialAck, error) => {
+      const run = await startPublicCase(count, initialAck, mode);
+      try {
+        expect(await run.observed).toBeUndefined();
+      } finally {
+        await run.release();
       }
-    } else {
-      expect(outcome).toMatchObject({ value: { status: "pass" } });
-    }
-  });
-});
+      const outcome = await run.outcome;
+      if (error) {
+        expect(outcome).toHaveProperty("error");
+        if ("error" in outcome) {
+          expect(String(outcome.error)).toContain(error);
+        }
+      } else {
+        expect(outcome).toMatchObject({ value: { status: "pass" } });
+      }
+    });
+  },
+);
 
 describe("terminal completion fixture contract", () => {
   it.each([
-    [false, "raw-child", "expected 0 outbound"],
-    [false, "raw-receipt", "raw child result used direct fallback"],
-    [true, undefined, undefined],
-    [true, "tools", "incorrect tool-free requester finalization"],
-    [true, "repeat-spawn", "sessions_spawn not observed"],
-  ] as const)("checks yielded=%s with fault=%s", async (yielded, fault, error) => {
-    const run = await startPublicCase(1, "missing", yielded, fault);
+    ["quiet", "raw-child", "expected 0 outbound"],
+    ["quiet", "raw-receipt", "unexpected direct-fallback receipt"],
+    ["fallback", "receipt-text", "unexpected direct-fallback receipt"],
+    ["fallback", "duplicate-result", "expected 1 outbound"],
+    ["yielded", undefined, undefined],
+    ["yielded", "raw-receipt", "unexpected direct-fallback receipt"],
+    ["yielded", "tools", "incorrect tool-free requester finalization"],
+    ["yielded", "repeat-spawn", "sessions_spawn not observed"],
+  ] as const)("checks mode=%s with fault=%s", async (mode, fault, error) => {
+    const run = await startPublicCase(1, "missing", mode, fault);
     try {
       expect(await run.observed).toBeUndefined();
     } finally {

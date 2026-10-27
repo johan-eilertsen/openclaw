@@ -917,10 +917,46 @@ async function buildResponsesPayload(
     terminalCompletionCase &&
     (terminalTurn?.kind === "completion" || terminalTurn?.kind === "settled")
   ) {
-    // Ordinary announcements settle quietly. Only the yielded batch's own
-    // continuation owes the original requester a consolidated final reply.
+    // Completion and settled wakes are new messages in the same scenario.
+    // Recover its explicit kickoff without treating quoted history as a new one.
+    const kickoff =
+      allUserTexts
+        .map((text) => splitMockConversationContext(text).current)
+        .findLast((text) => /subagent terminal reply qa check:/i.test(text)) ?? "";
+    const requesterYielded = /yield until the worker finishes/i.test(kickoff);
     if (terminalTurn.kind === "completion") {
-      return buildAssistantEvents(terminalCompletionCase === "visible" ? "" : "NO_REPLY");
+      if (requesterYielded || /keep ordinary completion quiet/i.test(kickoff)) {
+        return buildAssistantEvents(terminalCompletionCase === "visible" ? "" : "NO_REPLY");
+      }
+      const visibleRepresentation =
+        terminalCompletionCase === "silent" ? QA_SUBAGENT_TERMINAL_MARKERS.silent : undefined;
+      if (visibleRepresentation) {
+        if (completedToolName === "message") {
+          return buildAssistantEvents("");
+        }
+        if (canCallMessage) {
+          const deliveryInstructions = extractAllRequestTexts(
+            input.filter((item) => item.role === "system" || item.role === "developer"),
+            body,
+          );
+          const requiresFinal =
+            /visible source replies are not automatically delivered for this run\.[\s\S]*set `?final=true`?/i.test(
+              deliveryInstructions,
+            );
+          return buildToolCallEventsWithArgs("message", {
+            action: "send",
+            message: visibleRepresentation,
+            ...(requiresFinal ? { final: true } : {}),
+          });
+        }
+        return buildAssistantEvents(visibleRepresentation);
+      }
+      // Empty parent output settles quietly. Leave a visible answer unsent so
+      // direct-message fallback must deliver the child result or failure notice.
+      return buildAssistantEvents("The child run ended. Report its outcome to the requester.");
+    }
+    if (!requesterYielded) {
+      return buildAssistantEvents("Completion processed.");
     }
     if (terminalCompletionCase === "empty") {
       return buildAssistantEvents("");
@@ -935,7 +971,7 @@ async function buildResponsesPayload(
     ) {
       return buildAssistantEvents(`Reviewed worker result: ${marker}`);
     }
-    // Exercise both missing-answer dispositions before the tool-free finalizer.
+    // Yielded batches exercise both missing-answer dispositions before tool-free recovery.
     return buildAssistantEvents(terminalCompletionCase === "silent" ? "NO_REPLY" : "");
   }
   const terminalWorkerCase = terminalTurn?.kind === "worker" ? terminalTurn.caseName : undefined;

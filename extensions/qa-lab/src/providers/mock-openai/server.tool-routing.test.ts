@@ -214,6 +214,25 @@ it.each([true])("honors protocol failure %s over accepted catalog details", asyn
   ]);
 });
 
+it("reports an ordinary silent child through the catalog exactly once", async () => {
+  const turn = await startTurn("Subagent terminal reply QA check: silent.", {
+    model: "gpt-5.6-luna",
+    instructions:
+      "## Messaging\n### message tool\nVisible source replies are not automatically delivered for this run. Use message(action=send) for user-visible source-channel output. When the message is the completed reply to the current source conversation, set final=true.",
+  });
+  turn.input.push(
+    makeUserInput(
+      "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n[Internal task completion event]\nTask: qa-terminal-silent\nResult: (no output)\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+    ),
+  );
+  const call = outputToolCall(await turn.request(), "dispatch_action");
+  expect(callArgs(call)).toEqual({
+    id: "message",
+    args: { action: "send", message: "QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED", final: true },
+  });
+  expect(outputText(await turn.complete(call, catalogResult("message", { ok: true })))).toBe("");
+});
+
 it.each([
   {
     name: "silent child",
@@ -800,100 +819,110 @@ describe("subagent-handoff", () => {
         }
       },
     );
-    it("yields and settles an empty worker through the exposed dispatcher", async () => {
-      const server = await startMockServer();
-      const prompt = `[Mon 2026-09-21 00:11 UTC] Subagent terminal reply QA check: empty. Spawn one native worker, then yield until the worker finishes. Do not use ACP.`;
-      const input = [user(prompt), metadataCarrier];
-      const parent = {
-        model: "gpt-5.6-luna",
-        instructions: "Runtime: embedded | agent=qa | session=agent:qa:main",
-        client_metadata: { session_id: "structured-parent" },
-        tools: structuredTools,
-      };
-      const spawn = await expectNonStreamingResponsesJson(server, { ...parent, input });
-      const call = outputToolCall(spawn, "dispatch_action");
-      const args = outputToolArgs(spawn);
-      expect(args).toEqual({
-        id: "sessions_spawn",
-        args: {
-          task: "Subagent terminal reply QA worker: empty. Return no assistant output after the write.",
-          label: `qa-terminal-empty`,
-          thread: false,
-          mode: "run",
-        },
-      });
-      expect(await getJson(server, "/debug/last-request")).toMatchObject({
-        plannedToolName: "sessions_spawn",
-        plannedWireToolName: "dispatch_action",
-        plannedToolArgs: args.args,
-        plannedToolCallId: call.call_id,
-      });
-      const childSessionKey = "agent:qa:subagent:structured-child";
-      const accepted = { status: "accepted", childSessionKey, runId: "structured-run" };
-      const receipt = makeToolOutputWithCallId(
-        outputToolCallId(call, "spawn"),
-        JSON.stringify({
-          tool: { id: "openclaw:sessions_spawn", name: "sessions_spawn", source: "openclaw" },
-          result: {
-            content: [{ type: "text", text: JSON.stringify(accepted) }],
-            details: accepted,
+    it.each(["fallback", "yielded"] as const)(
+      "settles an empty worker through the exposed dispatcher (%s)",
+      async (mode) => {
+        const server = await startMockServer();
+        const prompt = `[Mon 2026-09-21 00:11 UTC] Subagent terminal reply QA check: empty. Spawn one native worker, ${mode === "yielded" ? "then yield until the worker finishes" : "reply to the requester after spawning, then finish without waiting"}. Do not use ACP.`;
+        const input = [user(prompt), metadataCarrier];
+        const parent = {
+          model: "gpt-5.6-luna",
+          instructions: "Runtime: embedded | agent=qa | session=agent:qa:main",
+          client_metadata: { session_id: "structured-parent" },
+          tools: structuredTools,
+        };
+        const spawn = await expectNonStreamingResponsesJson(server, { ...parent, input });
+        const call = outputToolCall(spawn, "dispatch_action");
+        const args = outputToolArgs(spawn);
+        expect(args).toEqual({
+          id: "sessions_spawn",
+          args: {
+            task: "Subagent terminal reply QA worker: empty. Return no assistant output after the write.",
+            label: `qa-terminal-empty`,
+            thread: false,
+            mode: "run",
           },
-        }),
-      );
-      const acknowledged = await expectNonStreamingResponsesJson(server, {
-        ...parent,
-        input: [...input, call, receipt],
-      });
-      expect(outputToolCall(acknowledged, "sessions_yield")).toBeDefined();
-      expect(outputItems(acknowledged).some((item) => item.type === "message")).toBe(false);
-      await settleParent(server, "structured-parent");
-      const child = {
-        model: "gpt-5.6-luna",
-        instructions: `Runtime: embedded\n- Your session: ${childSessionKey}.`,
-        client_metadata: { session_id: "structured-child" },
-        tools: structuredTools,
-        input: [user(String(requireRecord(args.args, "spawn arguments").task)), metadataCarrier],
-      };
-      const completed = await expectNonStreamingResponsesJson(server, child);
-      const write = outputToolCall(completed, "write");
-      expect(outputToolArgs(completed)).toEqual({
-        path: "qa-terminal-empty-side-effect.txt",
-        content: "empty terminal QA side effect completed\n",
-      });
-      const empty = await expectNonStreamingResponsesJson(server, {
-        ...child,
-        input: [
-          ...child.input,
-          write,
-          makeToolOutputWithCallId(outputToolCallId(write, "write"), "Wrote file"),
-        ],
-      });
-      expect(outputText(empty)).toBe("");
-      // Isolated finalization replays the raw task envelope, with the task outside
-      // the two internal scaffolding blocks.
-      const finalization = await expectNonStreamingResponsesJson(server, {
-        ...child,
-        tools: [],
-        input: [
-          user(
-            [
-              "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>",
-              "[Subagent Context] You are running as a subagent (depth 1/5).",
-              "[Subagent Task]",
-              "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
-              String(requireRecord(args.args, "spawn arguments").task),
-              "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>",
-              "Begin. Execute the assigned task to completion.",
-              "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
-            ].join("\n\n"),
-          ),
-          write,
-          makeToolOutputWithCallId(outputToolCallId(write, "write"), "Wrote file"),
-          user(QA_SETTLED_TOOL_TERMINAL_CONTINUATION_INSTRUCTION),
-        ],
-      });
-      expect(outputText(finalization)).toBe("");
-      expect(outputItems(finalization).some((item) => item.type === "function_call")).toBe(false);
-    });
+        });
+        expect(await getJson(server, "/debug/last-request")).toMatchObject({
+          plannedToolName: "sessions_spawn",
+          plannedWireToolName: "dispatch_action",
+          plannedToolArgs: args.args,
+          plannedToolCallId: call.call_id,
+        });
+        const childSessionKey = "agent:qa:subagent:structured-child";
+        const accepted = { status: "accepted", childSessionKey, runId: "structured-run" };
+        const receipt = makeToolOutputWithCallId(
+          outputToolCallId(call, "spawn"),
+          JSON.stringify({
+            tool: { id: "openclaw:sessions_spawn", name: "sessions_spawn", source: "openclaw" },
+            result: {
+              content: [{ type: "text", text: JSON.stringify(accepted) }],
+              details: accepted,
+            },
+          }),
+        );
+        const acknowledged = await expectNonStreamingResponsesJson(server, {
+          ...parent,
+          input: [...input, call, receipt],
+        });
+        if (mode === "yielded") {
+          expect(outputToolCall(acknowledged, "sessions_yield")).toBeDefined();
+          expect(outputItems(acknowledged).some((item) => item.type === "message")).toBe(false);
+        } else {
+          expect(outputItems(acknowledged).some((item) => item.type === "function_call")).toBe(
+            false,
+          );
+          expect(outputText(acknowledged)).toBe("QA-SUBAGENT-EMPTY-PARENT-ACK");
+        }
+        await settleParent(server, "structured-parent");
+        const child = {
+          model: "gpt-5.6-luna",
+          instructions: `Runtime: embedded\n- Your session: ${childSessionKey}.`,
+          client_metadata: { session_id: "structured-child" },
+          tools: structuredTools,
+          input: [user(String(requireRecord(args.args, "spawn arguments").task)), metadataCarrier],
+        };
+        const completed = await expectNonStreamingResponsesJson(server, child);
+        const write = outputToolCall(completed, "write");
+        expect(outputToolArgs(completed)).toEqual({
+          path: "qa-terminal-empty-side-effect.txt",
+          content: "empty terminal QA side effect completed\n",
+        });
+        const empty = await expectNonStreamingResponsesJson(server, {
+          ...child,
+          input: [
+            ...child.input,
+            write,
+            makeToolOutputWithCallId(outputToolCallId(write, "write"), "Wrote file"),
+          ],
+        });
+        expect(outputText(empty)).toBe("");
+        // Isolated finalization replays the raw task envelope, with the task outside
+        // the two internal scaffolding blocks.
+        const finalization = await expectNonStreamingResponsesJson(server, {
+          ...child,
+          tools: [],
+          input: [
+            user(
+              [
+                "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>",
+                "[Subagent Context] You are running as a subagent (depth 1/5).",
+                "[Subagent Task]",
+                "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+                String(requireRecord(args.args, "spawn arguments").task),
+                "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>",
+                "Begin. Execute the assigned task to completion.",
+                "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+              ].join("\n\n"),
+            ),
+            write,
+            makeToolOutputWithCallId(outputToolCallId(write, "write"), "Wrote file"),
+            user(QA_SETTLED_TOOL_TERMINAL_CONTINUATION_INSTRUCTION),
+          ],
+        });
+        expect(outputText(finalization)).toBe("");
+        expect(outputItems(finalization).some((item) => item.type === "function_call")).toBe(false);
+      },
+    );
   });
 });
