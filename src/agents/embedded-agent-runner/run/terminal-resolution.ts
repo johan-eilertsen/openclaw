@@ -22,6 +22,7 @@ import type { ResolvedProviderAuth } from "../../model-auth.js";
 import {
   createMissingReplyNotice,
   isHostMissingReplyNoticeText,
+  isRequiredRequesterSettlement,
   MISSING_REPLY_NOTICE_TEXT,
   resolveReplyExpectation,
   shouldDeliverMissingReplyNotice,
@@ -154,6 +155,7 @@ export function resolveSettledTurnFinalizationRequest(input: {
     terminalReplyExpectation: resolveReplyExpectation(input.runParams),
     replyDeliveryState: input.replyDeliveryState ?? "missing",
     allowEmptyStopContinuation: true,
+    allowNoToolFinalization: isRequiredRequesterSettlement(input.runParams),
     payloadCount,
     hasTerminalToolPresentation: input.hasTerminalToolPresentation,
     aborted: terminalAborted,

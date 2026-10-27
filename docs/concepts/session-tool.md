@@ -510,6 +510,21 @@ See [Session state awareness](/concepts/session-state) for the full model: event
 
 `sessions_yield` intentionally ends the current turn so the next message can be an announced child completion event. Use it for announcing sub-agents, not [Swarm collectors](/tools/swarm): collectors require explicit result collection through `agents_wait` or an awaited `agents.run()` in OpenClaw Code Mode, and send no completion notification.
 
+When the original request needs a consolidated answer after announced children finish,
+call `sessions_yield` after spawning them. A “started” acknowledgment by itself ends
+the current reply; it does not register that waiting obligation. Individual child
+completion events may still be consumed silently. Their consumption does not fulfill
+the yielded conversation’s final-answer obligation.
+
+The yielded continuation must deliver its own final answer, or explain that the
+request is blocked. If it ends silently or empty after the work has settled, the
+runtime uses bounded, tool-free finalization from the current transcript. If that
+also returns no answer, the existing missing-answer notice is delivered. Completed
+actions are not replayed by finalization. Private child findings remain internal;
+only the requester’s answer or the host notice is eligible for delivery. Stop,
+reset, and revoked delivery authority still cancel that eligibility, and uncertain
+delivery is reconciled rather than sent again.
+
 `subagents` lists native subagent runs within the controlled session tree. Use the returned `runId` with `action: "wait"` or `action: "cancel"`; cancellation does not grant access to unrelated sessions. ACP, media, shell processes, and cron retain their own status and cancellation owners.
 
 ## Spawning sub-agents

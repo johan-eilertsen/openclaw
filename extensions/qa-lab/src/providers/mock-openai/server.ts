@@ -871,10 +871,10 @@ async function buildResponsesPayload(
   }
   const terminalCompletionCase = terminalTurn?.caseName;
   const current = terminalTurn?.text ?? "";
-  if (terminalCompletionCase && terminalTurn?.kind === "settled") {
-    return buildAssistantEvents("Completion processed.");
-  }
   if (terminalCompletionCase === "private") {
+    if (terminalTurn?.kind === "settled") {
+      return buildAssistantEvents("Completion processed.");
+    }
     const nonce = QA_SUBAGENT_PRIVATE_RESULT_RE.exec(current)?.[0];
     const requestedSecondChild = input.some(
       (item) =>
@@ -913,33 +913,30 @@ async function buildResponsesPayload(
       });
     }
   }
-  if (terminalCompletionCase && terminalTurn?.kind === "completion") {
-    const visibleRepresentation =
-      terminalCompletionCase === "silent" ? QA_SUBAGENT_TERMINAL_MARKERS.silent : undefined;
-    if (visibleRepresentation) {
-      if (completedToolName === "message") {
-        return buildAssistantEvents("");
-      }
-      if (canCallMessage) {
-        const deliveryInstructions = extractAllRequestTexts(
-          input.filter((item) => item.role === "system" || item.role === "developer"),
-          body,
-        );
-        const requiresFinal =
-          /visible source replies are not automatically delivered for this run\.[\s\S]*set `?final=true`?/i.test(
-            deliveryInstructions,
-          );
-        return buildToolCallEventsWithArgs("message", {
-          action: "send",
-          message: visibleRepresentation,
-          ...(requiresFinal ? { final: true } : {}),
-        });
-      }
-      return buildAssistantEvents(visibleRepresentation);
+  if (
+    terminalCompletionCase &&
+    (terminalTurn?.kind === "completion" || terminalTurn?.kind === "settled")
+  ) {
+    // Ordinary announcements settle quietly. Only the yielded batch's own
+    // continuation owes the original requester a consolidated final reply.
+    if (terminalTurn.kind === "completion") {
+      return buildAssistantEvents(terminalCompletionCase === "visible" ? "" : "NO_REPLY");
     }
-    // Empty output exercises direct fallback. Exact NO_REPLY is intentional
-    // silence and must not be used as a missing-answer fixture.
-    return buildAssistantEvents("");
+    if (terminalCompletionCase === "empty") {
+      return buildAssistantEvents("");
+    }
+    const marker = Object.entries(QA_SUBAGENT_TERMINAL_MARKERS).find(
+      ([caseName]) => caseName === terminalCompletionCase,
+    )?.[1];
+    if (
+      isSettledToolContinuation &&
+      marker &&
+      (terminalCompletionCase === "silent" || allInputText.includes(marker))
+    ) {
+      return buildAssistantEvents(`Reviewed worker result: ${marker}`);
+    }
+    // Exercise both missing-answer dispositions before the tool-free finalizer.
+    return buildAssistantEvents(terminalCompletionCase === "silent" ? "NO_REPLY" : "");
   }
   const terminalWorkerCase = terminalTurn?.kind === "worker" ? terminalTurn.caseName : undefined;
   if (terminalWorkerCase) {
@@ -989,7 +986,8 @@ async function buildResponsesPayload(
     if (!hasCompletedToolOutput && canCallSessionsSpawn) {
       const task =
         terminalCompletionCase === "empty" &&
-        QA_SUBAGENT_EMPTY_PARENT_VISIBLE_PROMPT_RE.test(current)
+        (QA_SUBAGENT_EMPTY_PARENT_VISIBLE_PROMPT_RE.test(current) ||
+          /yield until the worker finishes/i.test(current))
           ? "Subagent terminal reply QA worker: empty. Return no assistant output after the write."
           : `Subagent terminal reply QA worker: ${terminalCompletionCase}.`;
       return buildToolCallEventsWithArgs("sessions_spawn", {
@@ -1000,8 +998,10 @@ async function buildResponsesPayload(
       });
     }
     if (hasCompletedToolOutput) {
-      // A visible acknowledgment ends the requester turn; NO_REPLY keeps a
-      // delegated visible turn alive and hands completion to requester settlement.
+      if (/yield until the worker finishes/i.test(current) && canCallSessionsYield) {
+        return buildToolCallEventsWithArgs("sessions_yield", {});
+      }
+      // A visible acknowledgment ends the requester turn without yielding.
       if (
         terminalCompletionCase === "empty" &&
         QA_SUBAGENT_EMPTY_PARENT_VISIBLE_PROMPT_RE.test(current)

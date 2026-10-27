@@ -8,7 +8,7 @@ scenario:
       - agent-runtime.subagent-turns-delivery
     secondary:
       - channels.qa-channel-final-reply
-  objective: Prove a native subagent with exhausted empty finalization remains failed without fabricating a result or repeating its completed write.
+  objective: Prove a deliberately yielded requester receives one host missing-answer notice after child and parent finalization exhaust, without fabricating a result or repeating the completed child write.
   gatewayConfigPatch:
     tools:
       alsoAllow:
@@ -23,7 +23,7 @@ scenario:
               - message
   successCriteria:
     - The child performs exactly one real write before returning empty assistant output.
-    - The requester receives one visible parent acknowledgement.
+    - The parent deliberately yields once and its settled continuation exhausts exactly two tool-free finalization attempts.
     - Exhausted finalization retains the failed child outcome and no assistant result.
     - The requester receives exactly one system failure notice, with no fabricated success or replay after Gateway restart.
   docsRefs:
@@ -95,7 +95,7 @@ flow:
             senderId:
               ref: conversationId
             senderName: QA Empty Reply Operator
-            text: "Subagent terminal reply QA check: empty. Spawn one native worker, reply to the requester after spawning, then finish without waiting. Do not use ACP."
+            text: "Subagent terminal reply QA check: empty. Spawn one native worker, then yield until the worker finishes. Do not use ACP."
         - call: waitForCondition
           saveAs: emptyRun
           args:
@@ -117,10 +117,10 @@ flow:
             message:
               expr: "`child run did not retain its failed empty terminal facts: ${JSON.stringify(waited)}`"
         - call: waitForCondition
-          saveAs: requesterAcknowledgements
+          saveAs: requesterNotices
           args:
             - lambda:
-                expr: "(() => { const messages = state.getSnapshot().messages.slice(startIndex).filter((message) => message.direction === 'outbound' && !message.deleted && message.conversation.id === conversationId && String(message.text ?? '').trim() === 'QA-SUBAGENT-EMPTY-PARENT-ACK'); return messages.length > 0 ? messages : undefined; })()"
+                expr: "(() => { const messages = state.getSnapshot().messages.slice(startIndex).filter((message) => message.direction === 'outbound' && !message.deleted && message.conversation.id === conversationId && String(message.text ?? '').trim() === config.expectedNotice); return messages.length > 0 ? messages : undefined; })()"
             - 60000
             - 250
         - set: emptyOutboundHistory
@@ -134,17 +134,27 @@ flow:
             expr: "emptyOutboundHistory.filter((message) => String(message.text ?? '').trim() === config.expectedNotice)"
         - set: finalizationRequests
           value:
-            expr: "emptyRequests.filter((request) => String(request.raw ?? '').includes('Subagent terminal reply QA worker: empty.') && String(request.raw ?? '').includes(config.settledToolRetryNeedle))"
+            expr: "emptyRequests.filter((request) => request.sessionId !== emptyRequests.find((candidate) => candidate.plannedToolName === 'sessions_spawn')?.sessionId && String(request.raw ?? '').includes('Subagent terminal reply QA worker: empty.') && String(request.prompt ?? '').includes(config.settledToolRetryNeedle))"
+        - set: parentRequests
+          value:
+            expr: "emptyRequests.filter((request) => request.sessionId === emptyRequests.find((candidate) => candidate.plannedToolName === 'sessions_spawn')?.sessionId)"
+        - set: parentFinalizationRequests
+          value:
+            expr: "parentRequests.filter((request) => String(request.prompt ?? '').includes(config.settledToolRetryNeedle))"
         - assert:
-            expr: "requesterAcknowledgements.length === 1"
+            expr: "parentFinalizationRequests.length === 2 && parentFinalizationRequests.every((request) => !Array.isArray(request.body?.tools) || request.body.tools.length === 0) && parentRequests.filter((request) => request.cursor >= parentFinalizationRequests[0]?.cursor).every((request) => parentFinalizationRequests.includes(request))"
             message:
-              expr: "`requester did not receive exactly one parent acknowledgement; outbound=${recentOutboundSummary(state)}`"
+              expr: "`requester did not exhaust exactly two tool-free finalizations, or resumed model work afterward: ${JSON.stringify(parentRequests)}`"
+        - assert:
+            expr: "requesterNotices.length === 1 && !emptyOutboundHistory.some((message) => String(message.text ?? '').includes('QA-SUBAGENT-EMPTY-PARENT-ACK'))"
+            message:
+              expr: "`yielded requester did not receive exactly one host notice; outbound=${recentOutboundSummary(state)}`"
         - assert:
             expr: "emptyTerminalOutbound.length === 1 && !emptyTerminalOutbound[0].deleted"
             message:
               expr: "`empty completion did not produce exactly one system failure notice; outbound=${recentOutboundSummary(state)} requests=${JSON.stringify(emptyRequests)}`"
         - assert:
-            expr: "emptyRequests.filter((request) => request.plannedToolName === 'sessions_spawn' && request.plannedToolArgs?.label === 'qa-terminal-empty').length === 1 && emptyRequests.filter((request) => request.plannedToolName === 'write' && request.plannedToolArgs?.path === config.sideEffectFile).length === 1 && !emptyRequests.some((request) => request.plannedToolName === 'sessions_yield')"
+            expr: "emptyRequests.filter((request) => request.plannedToolName === 'sessions_spawn' && request.plannedToolArgs?.label === 'qa-terminal-empty').length === 1 && emptyRequests.filter((request) => request.plannedToolName === 'write' && request.plannedToolArgs?.path === config.sideEffectFile).length === 1 && emptyRequests.filter((request) => request.plannedToolName === 'sessions_yield').length === 1 && !emptyRequests.some((request) => request.plannedToolName === 'message')"
             message:
               expr: "`empty completion repeated or skipped its action: ${JSON.stringify(emptyRequests)}`"
         - call: readSessionTranscriptSummary
@@ -241,4 +251,4 @@ flow:
             expr: "postRestartCompletionRequests.length === 0 && postRestartOutbound.filter((message) => message.text.trim() === config.expectedNotice).length === 1 && postRestartOutbound.some((message) => message.id === emptyTerminalOutbound[0].id && message.text.trim() === config.expectedNotice) && postRestartOutbound.every((message) => !message.text.includes(config.metadataSentinel) && !message.text.includes('BEGIN_OPENCLAW_INTERNAL_CONTEXT') && message.text.trim() !== 'NO_REPLY' && config.forbiddenReplies.every((reply) => !message.text.includes(reply)))"
             message:
               expr: "`Gateway restart replayed or lost the failure notice: requests=${JSON.stringify(postRestartRequests)} outbound=${JSON.stringify(postRestartOutbound)}`"
-      detailsExpr: "JSON.stringify({ runId: emptyRun.runId, execution: emptyRun.execution, delivery: emptyRun.delivery, inputDisposition: 'exhausted-empty-after-side-effect', requesterAcknowledgementCount: requesterAcknowledgements.length, expectedNotice: config.expectedNotice, childFinalText: childTranscript.finalText, finalizationCount: finalizationRequests.length, successfulWriteEvents: childWriteEvents, restoredSuccessfulWriteEvents: restoredChildWriteEvents, sideEffectFile: config.sideEffectFile, sideEffectContents, expectedNoticeCount: 1, actualNoticeCount: emptyTerminalOutbound.length, auxiliaryChannelEvents: emptyOutboundHistory.map((message) => String(message.text ?? '')), postRestartProviderRequestCount: postRestartRequests.length, postRestartCompletionRequestCount: postRestartCompletionRequests.length, providerMode: env.providerMode, pass: true }, null, 2)"
+      detailsExpr: "JSON.stringify({ runId: emptyRun.runId, execution: emptyRun.execution, delivery: emptyRun.delivery, inputDisposition: 'exhausted-empty-after-side-effect', requesterYieldCount: 1, parentFinalizationCount: parentFinalizationRequests.length, expectedNotice: config.expectedNotice, childFinalText: childTranscript.finalText, finalizationCount: finalizationRequests.length, successfulWriteEvents: childWriteEvents, restoredSuccessfulWriteEvents: restoredChildWriteEvents, sideEffectFile: config.sideEffectFile, sideEffectContents, expectedNoticeCount: 1, actualNoticeCount: emptyTerminalOutbound.length, auxiliaryChannelEvents: emptyOutboundHistory.map((message) => String(message.text ?? '')), postRestartProviderRequestCount: postRestartRequests.length, postRestartCompletionRequestCount: postRestartCompletionRequests.length, providerMode: env.providerMode, pass: true }, null, 2)"

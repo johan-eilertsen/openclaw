@@ -167,6 +167,8 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
     }
     if (
       (isSubagentCompletion || params.sourceTool === "subagent_settle") &&
+      !params.requireVisibleReply &&
+      effectiveReplyExpectation !== "result-required" &&
       requesterCompletedSuccessfully &&
       !hasVisibleNonSilentGatewayPayload &&
       directAnnounceResult?.meta?.yielded !== true &&

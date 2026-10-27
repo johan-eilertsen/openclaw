@@ -216,27 +216,61 @@ it.each([true])("honors protocol failure %s over accepted catalog details", asyn
 
 it.each([
   {
+    name: "silent child",
     scenario: "silent",
-    instructions:
-      "## Messaging\n### message tool\nVisible source replies are not automatically delivered for this run. Use message(action=send) for user-visible source-channel output. When the message is the completed reply to the current source conversation, set final=true.",
-    completion:
-      "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n[Internal task completion event]\nTask: qa-terminal-silent\nResult: (no output)\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
-    target: "message",
-    args: { action: "send", message: "QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED", final: true },
-    receipt: { ok: true },
-    reply: "",
+    result: "(no output)",
+    initial: "NO_REPLY",
+    final: "Reviewed worker result: QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED",
   },
+  {
+    name: "retained child result",
+    scenario: "fallback",
+    result: "QA-SUBAGENT-TERMINAL-FALLBACK-OK\nQA-SUBAGENT-TERMINAL-INTERNAL-MUST-NOT-LEAK",
+    initial: "",
+    final: "Reviewed worker result: QA-SUBAGENT-TERMINAL-FALLBACK-OK",
+  },
+  {
+    name: "missing child result",
+    scenario: "fallback",
+    result: "(no output)",
+    initial: "",
+    final: "",
+  },
+  { name: "empty child", scenario: "empty", result: "(no output)", initial: "", final: "" },
 ])(
-  "routes the $scenario completion through the catalog once",
-  async ({ scenario, instructions, completion, target, args, receipt, reply }) => {
-    const turn = await startTurn(`Subagent terminal reply QA check: ${scenario}.`, {
-      model: "gpt-5.6-luna",
-      instructions,
-    });
-    turn.input.push(makeUserInput(completion));
-    const call = outputToolCall(await turn.request(), "dispatch_action");
-    expect(callArgs(call)).toEqual({ id: target, args });
-    expect(outputText(await turn.complete(call, catalogResult(target, receipt)))).toBe(reply);
+  "keeps $name completion quiet and reserves recovery for the yielded batch",
+  async ({ scenario, result, initial, final }) => {
+    const turn = await startTurn(
+      `Subagent terminal reply QA check: ${scenario}. Spawn one native worker, then yield until the worker finishes.`,
+      {
+        model: "gpt-5.6-luna",
+      },
+    );
+    turn.input.push(
+      makeUserInput(
+        `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n[Internal task completion event]\nsource: subagent\ntask: qa-terminal-${scenario}\nstatus: completed; ready for parent review\n\nChild result: ${result}\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>`,
+      ),
+    );
+    const ordinary = await turn.request();
+    expect(outputText(ordinary)).toBe("NO_REPLY");
+    expect(outputItems(ordinary).some((item) => item.type === "function_call")).toBe(false);
+    turn.input.push(
+      makeUserInput(
+        "[Subagent Context] Every subagent in this batch has now settled. Answer the original request.\n[Inter-session message] sourceTool=subagent_settle",
+      ),
+    );
+    const settled = await turn.request();
+    expect(outputText(settled)).toBe(initial);
+    expect(outputItems(settled).some((item) => item.type === "function_call")).toBe(false);
+    for (let attempt = 0; attempt < (scenario === "empty" ? 2 : 1); attempt++) {
+      const finalized = await expectNonStreamingResponsesJson(turn.server, {
+        model: "gpt-5.6-luna",
+        tools: [],
+        input: [...turn.input, makeUserInput(QA_SETTLED_TOOL_TERMINAL_CONTINUATION_INSTRUCTION)],
+      });
+      expect(outputText(finalized)).toBe(final);
+      expect(outputItems(finalized).some((item) => item.type === "function_call")).toBe(false);
+    }
   },
 );
 
@@ -766,9 +800,9 @@ describe("subagent-handoff", () => {
         }
       },
     );
-    it("spawns and settles an empty worker through the exposed dispatcher", async () => {
+    it("yields and settles an empty worker through the exposed dispatcher", async () => {
       const server = await startMockServer();
-      const prompt = `[Mon 2026-09-21 00:11 UTC] Subagent terminal reply QA check: empty. Spawn one native worker, reply to the requester after spawning, then finish without waiting. Do not use ACP.`;
+      const prompt = `[Mon 2026-09-21 00:11 UTC] Subagent terminal reply QA check: empty. Spawn one native worker, then yield until the worker finishes. Do not use ACP.`;
       const input = [user(prompt), metadataCarrier];
       const parent = {
         model: "gpt-5.6-luna",
@@ -810,8 +844,8 @@ describe("subagent-handoff", () => {
         ...parent,
         input: [...input, call, receipt],
       });
-      expect(outputItems(acknowledged).some((item) => item.type === "function_call")).toBe(false);
-      expect(outputText(acknowledged)).toBe("QA-SUBAGENT-EMPTY-PARENT-ACK");
+      expect(outputToolCall(acknowledged, "sessions_yield")).toBeDefined();
+      expect(outputItems(acknowledged).some((item) => item.type === "message")).toBe(false);
       await settleParent(server, "structured-parent");
       const child = {
         model: "gpt-5.6-luna",

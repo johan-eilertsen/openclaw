@@ -683,7 +683,7 @@ describe("qa mock openai server", () => {
         "Subagent terminal reply QA check: empty.",
         "[Internal task completion event]\nTask: qa-terminal-empty\nChild task: Subagent terminal reply QA worker: empty.\nResult: (no output)",
       ),
-      "",
+      "NO_REPLY",
     ],
     [
       "lets child subagent prompts finish with an exact token",
@@ -1522,28 +1522,8 @@ describe("qa mock openai server", () => {
       );
       const tools = [SESSIONS_SPAWN_TOOL, MESSAGE_TOOL];
       const payload = await respond(server, input, { tools });
-      if (terminalCase === "visible") {
-        expectNoTool(payload);
-        expect(outputText(payload)).toBe("");
-        return;
-      }
-      const messageCall = findToolCall(payload, "message");
-      expect(callArgs(messageCall)).toMatchObject({
-        action: "send",
-        message: "QA-SUBAGENT-TERMINAL-SILENT-REPRESENTED",
-      });
-      const settled = await respond(
-        server,
-        [
-          ...input,
-          messageCall,
-          toolResult(callIdOf(messageCall, "message"), '{"ok":true}'),
-          carrier,
-        ],
-        { tools },
-      );
-      expectNoTool(settled);
-      expect(outputText(settled)).toBe("");
+      expectNoTool(payload);
+      expect(outputText(payload)).toBe(terminalCase === "visible" ? "" : "NO_REPLY");
     },
   );
 

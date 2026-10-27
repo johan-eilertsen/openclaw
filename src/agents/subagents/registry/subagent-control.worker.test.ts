@@ -580,6 +580,10 @@ describe("subagent progress drafts", () => {
         result: {
           payloads: terminal.text ? [{ text: terminal.text }] : [],
           meta: { terminalReply: terminal.terminalReply },
+          ...(terminal.text &&
+            params?.deliver === true && {
+              deliveryStatus: { status: "sent", resultCount: 1 },
+            }),
           ...(terminal.terminalReply.disposition === "silent" && {
             deliveryStatus: {
               status: "suppressed",
@@ -815,7 +819,7 @@ describe("subagent progress drafts", () => {
     ["internal NO_REPLY", "NO_REPLY", false],
     ["external empty reply", "", true],
     ["internal empty reply", "", false],
-  ] as const)("settles the progress card once after %s", async (_name, reply, external) => {
+  ] as const)("keeps the progress card until a final after %s", async (_name, reply, external) => {
     const requesterOrigin = external
       ? { channel: "telegram", to: "12345", accountId: "default" }
       : undefined;
@@ -834,7 +838,8 @@ describe("subagent progress drafts", () => {
       );
     }
     const draft = await adoptCohort(["a", "b"], requesterOrigin);
-    const wakes = answerWakes(draft, [reply]);
+    const wakes = answerWakes(draft, [reply, DONE]);
+    using clock = vi.spyOn(Date, "now");
 
     await endRun("a");
     expect(wakes).toEqual([]);
@@ -842,6 +847,20 @@ describe("subagent progress drafts", () => {
 
     await endRun("b");
     expect(wakes).toEqual([{ runId: expect.any(String), retiredBefore: 0 }]);
+    const needsFinal = reply !== DONE;
+    if (needsFinal) {
+      expectCard(draft, 0);
+      for (const runId of ["a", "b"]) {
+        const entry = loadSubagentRegistryFromSqlite().get(runId);
+        expect(entry?.requesterSettleWake?.status).toBe("pending");
+        expect(entry?.delivery?.status).not.toBe("delivered");
+      }
+      clock.mockReturnValue(Date.now() + 30_001);
+      await registryTesting.sweepOnceForTests();
+      await fixture.settle();
+      expect(wakes).toHaveLength(2);
+      expect(wakes[1]?.retiredBefore).toBe(0);
+    }
     expectCard(draft);
     const persisted = loadSubagentRegistryFromSqlite();
     for (const runId of ["a", "b"]) {
@@ -855,11 +874,10 @@ describe("subagent progress drafts", () => {
     expect(draft.push).toHaveBeenCalledWith(
       expect.objectContaining({ itemId: "b", kind: "subagent", status: "completed" }),
     );
-    using clock = vi.spyOn(Date, "now");
     clock.mockReturnValue(Date.now() + 120_000);
     await registryTesting.sweepOnceForTests();
     await fixture.settle();
-    expect(wakes).toHaveLength(1);
+    expect(wakes).toHaveLength(needsFinal ? 2 : 1);
     expectCard(draft);
   });
 

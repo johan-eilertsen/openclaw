@@ -22,6 +22,8 @@ const flow = (selected: unknown[]) => ({ steps: [{ name: step.name, actions: sel
 async function startPublicCase(
   acknowledgments: number,
   initialAck: "missing" | "deleted" | "foreign" = "missing",
+  yielded = false,
+  fault?: "raw-child" | "raw-receipt" | "tools" | "repeat-spawn",
 ) {
   const publicIndex = actions.findIndex((action) => isRecord(action) && "forEach" in action);
   if (publicIndex < 0) {
@@ -31,16 +33,37 @@ async function startPublicCase(
   const observed = createDeferred<unknown>();
   const releaseParent = createDeferred<void>();
   const parentSent = createDeferred<void>();
-  const marker = "QA-SUBAGENT-TERMINAL-FALLBACK-OK";
+  const caseName = yielded ? "fallback" : "visible";
+  const marker = yielded
+    ? "Reviewed worker result: QA-SUBAGENT-TERMINAL-FALLBACK-OK"
+    : "QA-SUBAGENT-TERMINAL-VISIBLE-OK";
   const run = {
-    label: "qa-terminal-fallback",
+    label: `qa-terminal-${caseName}`,
     execution: { status: "terminal", outcome: { status: "ok" } },
     delivery: { status: "delivered" },
     requesterSessionKey: "parent",
     childSessionKey: "child",
     runId: "run",
   };
-  const requests = [{ plannedToolName: "sessions_spawn", plannedToolArgs: { label: run.label } }];
+  const spawn = {
+    sessionId: "parent",
+    plannedToolName: "sessions_spawn",
+    plannedToolArgs: { label: run.label },
+  };
+  const requests = [
+    spawn,
+    ...(fault === "repeat-spawn" ? [spawn] : []),
+    ...(yielded
+      ? [
+          { sessionId: "parent", plannedToolName: "sessions_yield" },
+          {
+            sessionId: "parent",
+            prompt: scenario.execution.config?.settledToolRetryNeedle,
+            body: { tools: fault === "tools" ? [{ name: "write" }] : [] },
+          },
+        ]
+      : []),
+  ];
   let parentSend: Promise<void> | undefined;
   const result = runLoadedScenarioFlow(scenario.id, {
     state,
@@ -55,7 +78,7 @@ async function startPublicCase(
       readNativeQaSubagentRuns: async () => [run],
       config: {
         ...scenario.execution.config,
-        cases: [{ name: "fallback", marker, expectedSendCount: 1 }],
+        cases: [{ name: caseName, marker, yielded, expectedSendCount: yielded ? 1 : 0 }],
       },
       env: {
         providerMode: "mock-openai",
@@ -65,15 +88,21 @@ async function startPublicCase(
           call: async (method: string) => {
             if (method === "chat.history") {
               return {
-                messages: [
-                  {
-                    role: "assistant",
-                    provider: "openclaw",
-                    model: "delivery-mirror",
-                    __openclaw: { idempotencyKey: "announce:v1:child:run:text-direct" },
-                    content: [{ type: "text", text: marker }],
-                  },
-                ],
+                messages:
+                  fault === "raw-receipt"
+                    ? [
+                        {
+                          role: "assistant",
+                          provider: "openclaw",
+                          model: "automation-result",
+                          __openclaw: {
+                            idempotencyKey:
+                              "outbound-delivery:announce:v1:child:run:text-direct:raw",
+                          },
+                          content: [{ type: "text", text: marker }],
+                        },
+                      ]
+                    : [],
               };
             }
             throw new Error(`unexpected RPC ${method}`);
@@ -89,7 +118,9 @@ async function startPublicCase(
               to: `dm:${conversation}`,
               text,
             });
-          send(marker);
+          if (fault === "raw-child") {
+            send("QA-SUBAGENT-TERMINAL-VISIBLE-OK");
+          }
           if (initialAck === "deleted") {
             state.deleteMessage({ accountId: "default", messageId: send("Worker started.").id });
           } else if (initialAck === "foreign") {
@@ -97,7 +128,7 @@ async function startPublicCase(
           }
           parentSend = releaseParent.promise.then(() => {
             for (let i = 0; i < acknowledgments; i++) {
-              send("Worker started.");
+              send(yielded ? marker : "Worker started.");
             }
             parentSent.resolve();
           });
@@ -150,7 +181,7 @@ async function startPublicCase(
   };
 }
 
-describe("terminal completion scenario parent acknowledgment", () => {
+describe("quiet completion scenario parent acknowledgment", () => {
   it.each([
     [1, "missing", undefined],
     [1, "deleted", undefined],
@@ -159,6 +190,32 @@ describe("terminal completion scenario parent acknowledgment", () => {
     [2, "missing", "spawning parent did not acknowledge"],
   ] as const)("checks %i final acknowledgments after %s", async (count, initialAck, error) => {
     const run = await startPublicCase(count, initialAck);
+    try {
+      expect(await run.observed).toBeUndefined();
+    } finally {
+      await run.release();
+    }
+    const outcome = await run.outcome;
+    if (error) {
+      expect(outcome).toHaveProperty("error");
+      if ("error" in outcome) {
+        expect(String(outcome.error)).toContain(error);
+      }
+    } else {
+      expect(outcome).toMatchObject({ value: { status: "pass" } });
+    }
+  });
+});
+
+describe("terminal completion fixture contract", () => {
+  it.each([
+    [false, "raw-child", "expected 0 outbound"],
+    [false, "raw-receipt", "raw child result used direct fallback"],
+    [true, undefined, undefined],
+    [true, "tools", "incorrect tool-free requester finalization"],
+    [true, "repeat-spawn", "sessions_spawn not observed"],
+  ] as const)("checks yielded=%s with fault=%s", async (yielded, fault, error) => {
+    const run = await startPublicCase(1, "missing", yielded, fault);
     try {
       expect(await run.observed).toBeUndefined();
     } finally {
