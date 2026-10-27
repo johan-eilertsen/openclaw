@@ -67,6 +67,8 @@ const repositoryScriptEntries = [
   // Its header documents the paired operator-role currency-check benchmark.
   "scripts/perf/operator-role-source-policy-measure.mjs!",
   "scripts/perf/access-authority-callback-measure.mjs!",
+  // Its header documents the config-wide admission metadata benchmark.
+  "scripts/perf/config-wide-metadata-measure.ts!",
   // Its header documents the sandbox/workspace ownership assertion benchmark.
   "scripts/perf/workspace-assertion-measure.mjs!",
   // Its header documents the paired workspace reconciliation benchmark.
@@ -75,6 +77,8 @@ const repositoryScriptEntries = [
   // Its header documents the full transcript-pairing repair benchmark.
   "scripts/perf/tool-result-pairing-measure.ts!",
   "scripts/perf/assistant-thinking-measure.ts!",
+  // Its header documents leaf SELF-byte attribution of sampled survivor profiles.
+  "scripts/perf/survivor-leaf-rank.mjs!",
   // db:postgres:gen/check invoke this generator through the source loader.
   "scripts/generate-postgres-schema.mts!",
   // CI preflight executes the manifest from its trusted harness checkout.
@@ -198,6 +202,8 @@ const repositoryScriptEntries = [
   "scripts/perf/session-tool-surface-measure.ts!",
   "scripts/perf/subagent-maintenance-capture-measure.ts!",
   "scripts/perf/subagent-sweep-measure.ts!",
+  // Its source header documents the shutdown workload; the literal URL links its preload.
+  "scripts/perf/gateway-shutdown-sweep-measure.ts!",
   "scripts/perf/tool-schema-preparation-measure.ts!",
   "scripts/perf/terminal-assistant-snapshot-measure.ts!",
   // Their source headers and retained guide document standalone Node commands.
@@ -223,6 +229,7 @@ const repositoryScriptEntries = [
   "scripts/perf/session-history-prewarm-measure.mjs!",
   "scripts/perf/session-prepared-list-measure.ts!",
   "scripts/perf/session-list-search-measure.ts!",
+  "scripts/perf/session-list-transmit-measure.mjs!",
   "scripts/perf/transcript-boot-preload.mjs!",
   "scripts/perf/worker-pool-churn-preload.mjs!",
   "scripts/perf/worktree-prompt-native-measure.ts!",
@@ -654,6 +661,7 @@ const repositoryScriptEntries = [
   "scripts/perf/plugin-object-copy-measure.ts!",
   "scripts/perf/plugin-recovery-transport-measure.ts!",
   "scripts/perf/plugin-startup-install-records.ts!",
+  "scripts/perf/plugin-metadata-read-measure.ts!",
   "scripts/perf/plugins-list-measure.ts!",
   "scripts/perf/plugins-list-owner-measure.ts!",
   "scripts/perf/provider-prompt-worker-bytes-measure.mjs!",
