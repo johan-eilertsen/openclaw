@@ -24,6 +24,7 @@ import {
 } from "./harness/runtime-plugin-load-plan.js";
 import { ensureSelectedAgentHarnessPlugin } from "./harness/runtime-plugin.js";
 import { resolveModelCandidateChain } from "./model-fallback-candidates.js";
+import * as modelSelectionConfig from "./model-selection-config.js";
 import {
   getPreparedModelRuntimeBorrowedSnapshot,
   getPreparedModelRuntimePluginGeneration,
@@ -56,11 +57,14 @@ describe("prepared reply fallback ownership", () => {
     vi.spyOn(agentScope, "resolveAgentModelFallbacksOverride").mockImplementation(
       actual.resolveAgentModelFallbacksOverride,
     );
-    vi.spyOn(agentScope, "resolveEffectiveModelFallbacks").mockImplementation(
-      actual.resolveEffectiveModelFallbacks,
+    const actualSelection = await vi.importActual<typeof modelSelectionConfig>(
+      "./model-selection-config.js",
     );
-    vi.spyOn(agentScope, "resolveModelFallbackAvailability").mockImplementation(
-      actual.resolveModelFallbackAvailability,
+    vi.spyOn(modelSelectionConfig, "resolveEffectiveModelFallbacks").mockImplementation(
+      actualSelection.resolveEffectiveModelFallbacks,
+    );
+    vi.spyOn(modelSelectionConfig, "resolveModelFallbackAvailability").mockImplementation(
+      actualSelection.resolveModelFallbackAvailability,
     );
     vi.spyOn(agentScope, "resolveSubagentSpawnModelFallbacksOverride").mockImplementation(
       actual.resolveSubagentSpawnModelFallbacksOverride,
@@ -231,8 +235,10 @@ describe("prepared reply fallback ownership", () => {
       const pluginGeneration = getPreparedModelRuntimePluginGeneration()!;
       const prepared = getPreparedModelRuntimeBorrowedSnapshot(pluginGeneration)!;
       snapshots.add(prepared);
+      // Embedded runs receive an equivalent config projection, not the published object.
+      const runConfig = structuredClone(config);
       const workspaces = resolvePreparedRuntimeWorkspaces({
-        config,
+        config: runConfig,
         agentId: dispatch.agentId,
         agentDir: dispatch.agentDir,
         workspaceDir: context.workspaceDir,
@@ -240,7 +246,7 @@ describe("prepared reply fallback ownership", () => {
       } as RunEmbeddedAgentParamsWithSessionFile);
       await using nested = await acquireAgentRunPreparedModelRuntime(
         {
-          config,
+          config: runConfig,
           agentId: dispatch.agentId,
           agentDir: dispatch.agentDir,
           workspaceDir: workspaces.runtimeWorkspaceResolution.workspaceDir,

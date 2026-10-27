@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
 import { text as readBody } from "node:stream/consumers";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { withFastReplyConfig } from "../../../../src/auto-reply/reply/get-reply-fast-path.test-support.js";
 import { getRuntimeConfigSnapshot } from "../../../../src/config/config.js";
@@ -67,7 +68,10 @@ type Scenario = {
   handsOver: boolean;
   unrelated?: boolean;
   longCall?: boolean;
+  // Shipped plugin tools do not report synthetic generations or effect logs.
+  bundled?: Bundled;
 };
+type Bundled = { id: string; tool: string };
 type EngineEvent = { event: string; generation: number; atMs: number; toolResults?: number };
 
 function writeToolCall(response: ServerResponse, name: string, id: string) {
@@ -189,16 +193,27 @@ const scenarios: Scenario[] = [
     plugins: [{ id: "engine-proof", turnHandover: true, contextEngine: true }],
     handsOver: true,
   },
+  {
+    name: "bundled Knowledge",
+    plugins: [],
+    handsOver: true,
+    bundled: { id: "knowledge", tool: "knowledge_status" },
+  },
 ];
 
 it.for(scenarios)(
   "plugin reload during a running turn: $name",
   { timeout: 180_000 },
-  async ({ name, plugins, handsOver, unrelated, longCall }, { signal, onTestFinished }) => {
+  async (
+    { name, plugins, handsOver, unrelated, longCall, bundled },
+    { signal, onTestFinished },
+  ) => {
     const home = tempDirs.make("openclaw-turn-handover-");
     const stateDir = path.join(home, ".openclaw");
     const workspaceDir = path.join(home, "workspace");
-    const bundledPluginsDir = path.join(home, "empty-bundled");
+    const bundledPluginsDir = bundled
+      ? path.resolve("extensions")
+      : path.join(home, "empty-bundled");
     const configPath = path.join(stateDir, "openclaw.json");
     const counts = path.join(home, "hooks.log");
     const events = path.join(home, "engine.log");
@@ -206,9 +221,9 @@ it.for(scenarios)(
     await Promise.all(
       [stateDir, workspaceDir, bundledPluginsDir].map((dir) => fs.mkdir(dir, { recursive: true })),
     );
-    const written = await Promise.all(
-      plugins.map((plugin) => writePlugin(home, plugin, counts, events)),
-    );
+    const written = bundled
+      ? [{ ...bundled, root: "" }]
+      : await Promise.all(plugins.map((plugin) => writePlugin(home, plugin, counts, events)));
     const sessionKey = "agent:main:dashboard:" + randomUUID();
     const token = randomUUID();
     const failure = createDeferred<Error>();
@@ -240,6 +255,7 @@ it.for(scenarios)(
       OPENCLAW_GATEWAY_TOKEN: token,
       OPENCLAW_TEST_MINIMAL_GATEWAY: undefined,
       OPENCLAW_BUNDLED_PLUGINS_DIR: bundledPluginsDir,
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: bundled ? undefined : "1",
       NO_PROXY: "127.0.0.1,localhost",
       no_proxy: "127.0.0.1,localhost",
     };
@@ -292,6 +308,10 @@ it.for(scenarios)(
                     "plugin" | "generation" | "finishedAtMs"
                   >),
                 });
+                // The bundled tool is fast; slow its steps so the reload lands mid-turn.
+                if (bundled) {
+                  await delay(1_500);
+                }
               }
               if (steps.length === RELOAD_AFTER_STEP && !reload) {
                 reloadStartedAt = Date.now();
@@ -395,19 +415,21 @@ it.for(scenarios)(
             ]),
           ),
         };
+        if (bundled) {
+          cfg.plugins = { enabled: true, allow: [bundled.id], slots: { memory: bundled.id } };
+        }
         cfg.tools = { allow: written.map(({ tool }) => tool), codeMode: false, toolSearch: false };
         cfg.gateway = { auth: { mode: "token", token } };
         await fs.writeFile(configPath, JSON.stringify(cfg));
         await seedInstalledPluginIndex(
           Object.fromEntries(
-            written.map(({ id, root }) => [
-              id,
-              { source: "path", sourcePath: root, installPath: root },
-            ]),
+            written
+              .filter(({ root }) => root)
+              .map(({ id, root }) => [id, { source: "path", sourcePath: root, installPath: root }]),
           ),
           { env: process.env, config: cfg },
         );
-        for (const { id, root } of written) {
+        for (const { id, root } of written.filter((plugin) => plugin.root)) {
           await resolvePluginCapabilityConsent({
             config: cfg,
             pluginId: id,
@@ -478,9 +500,10 @@ it.for(scenarios)(
         // agent_end side effects settle after the reply; wait for every plugin, then for strays.
         const agentEnds = async () =>
           (await fs.readFile(counts, "utf8").catch(() => "")).split("\n").filter(Boolean).length;
+        const expectedAgentEnds = bundled ? 0 : written.length * (unrelated ? 2 : 1);
         for (
           let waited = 0;
-          (await agentEnds()) < written.length * (unrelated ? 2 : 1) && waited < 15_000;
+          (await agentEnds()) < expectedAgentEnds && waited < 15_000;
           waited += 100
         ) {
           await new Promise((resolve) => {
@@ -491,12 +514,15 @@ it.for(scenarios)(
           setTimeout(resolve, 1_000);
         });
         const cpu = process.cpuUsage(cpuBefore);
-        const effects = (await fs.readFile(path.join(home, "effects.log"), "utf8"))
-          .trim()
-          .split("\n")
-          .map(
-            (line) => JSON.parse(line) as { callId: string; plugin: string; generation: number },
-          );
+        const effects = bundled
+          ? undefined
+          : (await fs.readFile(path.join(home, "effects.log"), "utf8"))
+              .trim()
+              .split("\n")
+              .map(
+                (line) =>
+                  JSON.parse(line) as { callId: string; plugin: string; generation: number },
+              );
         const summary = {
           turnMs: deliveredAt - startedAt,
           workloadMs: Date.now() - workloadStartedAt,
@@ -504,7 +530,7 @@ it.for(scenarios)(
           rssBeforeBytes: rssBefore,
           rssAfterBytes: process.memoryUsage().rss,
           processPeakRssKiB: process.resourceUsage().maxRSS,
-          effects: effects.length,
+          effects: effects?.length,
           reloadMs: reloadSettledAt - reloadStartedAt,
           reloadSettledBeforeReply: reloadSettledAt < deliveredAt,
           steps: steps.map(({ plugin, generation, atMs }) => `${plugin}@${generation}+${atMs}ms`),
@@ -537,9 +563,11 @@ it.for(scenarios)(
 
         // Each turn executes its effects once and fires agent_end once per plugin.
         expect(steps, proof).toHaveLength(STEPS);
-        expect(effects, proof).toHaveLength(STEPS + (unrelated ? 1 : 0));
-        expect(new Set(effects.map(({ callId }) => callId)).size, proof).toBe(effects.length);
-        expect(summary.agentEnds, proof).toBe(written.length * (unrelated ? 2 : 1));
+        if (effects) {
+          expect(effects, proof).toHaveLength(STEPS + (unrelated ? 1 : 0));
+          expect(new Set(effects.map(({ callId }) => callId)).size, proof).toBe(effects.length);
+        }
+        expect(summary.agentEnds, proof).toBe(expectedAgentEnds);
         expect(finalReplies, proof).toBe(1);
         if (unrelated) {
           expect(arrivalFinals, proof).toBe(1);
@@ -564,16 +592,16 @@ it.for(scenarios)(
         }
         const later = steps.slice(RELOAD_AFTER_STEP + 1);
         if (handsOver) {
-          // The reload finished mid-turn; unchanged plugins retain their generation.
+          // Unchanged plugins retain their generation (checked above). Reloaded
+          // plugins can move a step late, but never return to their old generation.
           expect(summary.reloadSettledBeforeReply, proof).toBe(true);
-          expect(
-            later.every(({ plugin, generation }) =>
-              unrelated
-                ? generation === firstGeneration.get(plugin)
-                : generation > (firstGeneration.get(plugin) ?? 0),
-            ),
-            proof,
-          ).toBe(true);
+          if (!unrelated && !bundled) {
+            const moved = later.map(
+              ({ plugin, generation }) => generation > firstGeneration.get(plugin)!,
+            );
+            const landed = moved.indexOf(true);
+            expect(landed >= 0 && moved.slice(landed).every(Boolean), proof).toBe(true);
+          }
         } else {
           // The reload waited for the whole turn, which stayed on its first generation.
           expect(summary.reloadSettledBeforeReply, proof).toBe(false);

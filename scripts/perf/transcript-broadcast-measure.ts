@@ -1114,7 +1114,7 @@ async function workerHeapCommand(worker: WorkerHeapEvidence, operation: string) 
   }
 }
 const targetWorkerScript = (script: string) =>
-  /^(?:(sqlite-store|prepared-model-catalog|git-operation)\.worker|storage-worker)\.[cm]?[jt]s$/.test(
+  /^(?:(sqlite-store|prepared-model-catalog|git-operation|openclaw-state-read|session-accessor\.sqlite-archive)\.worker|storage-worker)\.[cm]?[jt]s$/.test(
     script,
   );
 const project = Array.isArray(fixture.projectWorktrees) ? fixture.projectWorktrees[0] : undefined;
@@ -1566,14 +1566,16 @@ if (isMainThread) {
   timer.unref();
   process.on("message", message => {
     if (message?.turnStartTimelineFlush !== true) return;
+    process.channel?.ref();
     stopped = true;
     clearInterval(timer);
     reservation.unsubscribe(onReservation);
     worker.unsubscribe(onWorker);
     stopRequests();
     flush();
-    process.send?.({ turnStartTimelineFlushed: true, dropped });
+    process.send?.({ turnStartTimelineFlushed: true, dropped }, () => process.channel?.unref());
   });
+  process.channel?.unref();
 }
 if (isMainThread) onTrustedInternalDiagnosticEvent(event => {
   if (event.type === "diagnostic.phase.completed" &&
@@ -1892,6 +1894,7 @@ if (isMainThread) {
         scope: "main-isolate capture calls and clone payloads; serialized UTF-8 bytes and graph objects, not heap allocation" }));
     }
   });
+  process.channel?.unref();
 }
 `,
   );
@@ -7825,6 +7828,8 @@ try {
       "sqlite-store.worker.js",
       "prepared-model-catalog.worker.js",
       "git-operation.worker.js",
+      "openclaw-state-read.worker.js",
+      "session-accessor.sqlite-archive.worker.js",
       ...(values["knowledge-worker-heap"] ? ["storage-worker.js"] : []),
     ]) {
       const largest = startedHeapWorkers

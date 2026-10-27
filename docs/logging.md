@@ -123,6 +123,11 @@ openclaw doctor
 The Control UI's **Logs** tab tails the same file using `logs.tail`.
 See [Control UI](/web/control-ui) for how to open it.
 
+The tab retains the latest 2,000 lines and renders a window around the current
+scroll position. Filter and Export cover the entire retained history; browser
+Find and native text selection cover the rendered window. Use Filter to find an
+older retained line, or Export to copy all matching lines.
+
 ### Channel-only logs
 
 To filter channel activity (WhatsApp/Telegram/etc), use:
@@ -1257,7 +1262,12 @@ single listed stack does not mean that stack occupied the whole interval.
 Model-call diagnostics record bounded request/response measurements without
 capturing raw prompt or response content:
 
-- `requestPayloadBytes`: UTF-8 byte size of the final model request payload
+- `requestPayloadBytes`: UTF-8 byte size of the final model request payload.
+  OpenAI and Anthropic Messages transports reuse the serialized body size, after
+  payload hooks and transport adjustments. Other transports measure the payload
+  exposed by their hook; this may differ from the final wire body. Injected
+  Anthropic SDK clients and SDKs without a host fetch also use the hook
+  measurement because they own encoding and network I/O.
 - `responseStreamBytes`: UTF-8 byte size of streamed model response chunk
   payloads. High-frequency text, thinking, and tool-call delta events count
   only the incremental `delta` bytes instead of full `partial` snapshots.
