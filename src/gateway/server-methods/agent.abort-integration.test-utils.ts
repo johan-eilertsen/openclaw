@@ -1705,6 +1705,8 @@ describe("gateway agent handler chat.abort integration", () => {
     const runId = "idem-agent-expired-queue-deadline";
     let nowMs = 1_000_000;
     const dateNow = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+    let elapsedMs = 0;
+    const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => elapsedMs);
     const agentResult = createDeferred<HeldAgentResult>();
     let settlement: Promise<void> | undefined;
     let onExecutionStarted: (() => void | Promise<void>) | undefined;
@@ -1733,6 +1735,8 @@ describe("gateway agent handler chat.abort integration", () => {
       const startedAtMs = sourceQueuedAt(abortEntry);
       const queueExpiresAtMs = sourceExpiry(abortEntry);
       nowMs = queueExpiresAtMs + 1;
+      // Expire the 120-second queue budget without firing the maintenance timer.
+      elapsedMs = 120_001;
       const executionStarted = requireValue(onExecutionStarted, "execution-start callback missing");
       await executionStarted();
 
@@ -1750,6 +1754,7 @@ describe("gateway agent handler chat.abort integration", () => {
       await settlement;
       await remaining;
       dateNow.mockRestore();
+      performanceNow.mockRestore();
     }
   });
 
