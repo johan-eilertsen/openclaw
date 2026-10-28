@@ -35,7 +35,6 @@ import type { SessionEntry } from "../../config/sessions.js";
 import {
   isTrustedMessageActionTurnIngress,
   mintMessageActionTurnCapability,
-  resolveMessageActionTurnCapabilityLifetime,
 } from "../../gateway/message-action-turn-capability.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { isReasoningTagProvider } from "../../utils/provider-utils.js";
@@ -396,7 +395,9 @@ export function mintReplyMessageActionTurnCapability(
       hasRepliedRef: context.hasRepliedRef,
       sameChannelThreadRequired: context.sameChannelThreadRequired,
     },
-    ...resolveMessageActionTurnCapabilityLifetime(turn.followupRun.run.timeoutMs),
+    // Retries and approval waits can outlive one attempt's timeout. The fallback
+    // candidate owns revocation on cancellation and settlement.
+    expiresWithRun: true,
   });
 }
 

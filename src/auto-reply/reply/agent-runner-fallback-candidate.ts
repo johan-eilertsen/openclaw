@@ -272,6 +272,13 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
           turn,
           params.runId,
         );
+        const revokeMessageAuthority = () => {
+          revokeMessageActionTurnCapability(messageActionTurnCapability);
+        };
+        params.runAbortSignal?.addEventListener("abort", revokeMessageAuthority, { once: true });
+        if (params.runAbortSignal?.aborted) {
+          revokeMessageAuthority();
+        }
         try {
           const common = {
             ...runOptions,
@@ -339,8 +346,9 @@ export async function runAgentFallbackCandidates(params: AgentFallbackCycleParam
           );
           return result;
         } finally {
+          params.runAbortSignal?.removeEventListener("abort", revokeMessageAuthority);
+          revokeMessageAuthority();
           runStart.close();
-          revokeMessageActionTurnCapability(messageActionTurnCapability);
         }
       },
     }),
