@@ -6,4 +6,6 @@
 # Integration a3283f78e00f: main uses 6,310,389 lines; retained PR coverage adds 1,775.
 # Preserve distinct authority, visible-final, delivery and SDK boundary proofs.
 # Exact combined total, zero added reserve; no counting or assertion changes.
-6312164
+# CI base 6a2b56560cac adds 130 upstream lines: 6,310,519 + unchanged 1,775.
+# Tested merge 26a21f4d07ee uses 6,312,294; retain zero additional reserve.
+6312294
