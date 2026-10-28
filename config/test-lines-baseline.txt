@@ -3,4 +3,7 @@
 # Add 8,000 bounded lines (~0.127%); this is reserve, not a combined-repair estimate.
 # Counting, branch-delta handling and all test/CI requirements stay unchanged.
 # Future increases require separate justification; no automatic budget growth.
-6310000
+# Integration 022048904b5e: main uses 6,310,083 lines; retained PR coverage adds 1,775.
+# Preserve distinct authority, visible-final, delivery and SDK boundary proofs.
+# Exact combined total, zero added reserve; no counting or assertion changes.
+6311858
