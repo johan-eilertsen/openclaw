@@ -100,9 +100,9 @@ export function createAdmittedSessionEntryCohortReader(params: {
         if (!assertNativeCurrent) {
           throw new Error("Session cohort consumption has ended");
         }
+        assertNativeCurrent();
         assertOwnerCurrent();
         assertCallerCurrent();
-        assertNativeCurrent();
       };
       const source: AgentDatabaseRequestExecutionSource = {
         assertCurrent,
@@ -137,7 +137,18 @@ export function createAdmittedSessionEntryCohortReader(params: {
             runOpenClawAgentWriteAdmissions(
               [database],
               async () => {
-                assertNativeCurrent = captureSessionEntryNativeMutationWitness([database]);
+                assertOwnerCurrent();
+                const generation = params.execution.capturePreparedGenerationClaim();
+                if (!generation) {
+                  throw new SessionEntryChangedDuringReadError();
+                }
+                // Capture after FIFO wait, then pin this generation through read and consume.
+                captured.expected.incarnation = generation.incarnation;
+                const assertUnchanged = captureSessionEntryNativeMutationWitness([database]);
+                assertNativeCurrent = () => {
+                  generation.assertCurrent();
+                  assertUnchanged();
+                };
                 try {
                   assertCurrent();
                   return await run();

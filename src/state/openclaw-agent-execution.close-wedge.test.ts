@@ -2,6 +2,8 @@ import fs from "node:fs";
 import type { Worker } from "node:worker_threads";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { loadSessionEntryForAdmission } from "../config/sessions/session-accessor.sqlite-entry-admission.js";
+import { replaceSessionEntrySync } from "../config/sessions/session-accessor.sqlite-entry.js";
 import * as backoff from "../infra/backoff.js";
 import { formatErrorMessageWithCode } from "../infra/errors.js";
 import { createSqliteWorkerOperationAdmission } from "../infra/sqlite-worker-operation-admission.js";
@@ -213,6 +215,12 @@ it("recovers after a failed operation with successful native close", async () =>
 
 it("reopens a native generation lost between operations before dispatch", async () => {
   const env = { OPENCLAW_STATE_DIR: fs.realpathSync(tempDirs.make("agent-native-preflight-")) };
+  const session = { agentId: "first", env, sessionKey: "agent:first:retained-admission" };
+  replaceSessionEntrySync(session, {
+    sessionId: "retained",
+    lifecycleRevision: "original",
+    updatedAt: 1,
+  });
   const execution = captureOpenClawAgentDatabaseExecution({ agentId: "first", env });
   await execution.prepare(source);
   expect(
@@ -222,6 +230,9 @@ it("reopens a native generation lost between operations before dispatch", async 
   ).toMatchObject({ entries: [] });
   const claim = execution.captureGenerationClaim();
   expect(() => claim.assertCurrent()).not.toThrow();
+  const { databaseClaim: admission } = await loadSessionEntryForAdmission(session);
+  const reader = "reader" in admission && admission.reader;
+  expect(reader).toBeTruthy();
 
   const agentWorker = [...fault.workers].at(-1);
   expect(agentWorker).toBeDefined();
@@ -240,6 +251,36 @@ it("reopens a native generation lost between operations before dispatch", async 
   expect(replacement?.identity).toBe(claim.identity);
   expect(replacement?.incarnation).not.toBe(claim.incarnation);
   expect(() => claim.assertCurrent()).toThrow("Agent database execution generation was replaced");
+  // Chat retains its admission across tool calls; a recovered worker is not a reset.
+  if (!reader) {
+    throw new Error("Expected a retained admission reader");
+  }
+  try {
+    for (let read = 0; read < 2; read++) {
+      await expect(
+        reader.withRead(
+          { sessionKeys: [session.sessionKey] },
+          () => {},
+          (result) => result.entries,
+        ),
+      ).resolves.toMatchObject([
+        { entry: { sessionId: "retained", lifecycleRevision: "original" } },
+      ]);
+      expect(admission.incarnation).toBe(replacement?.incarnation);
+    }
+    replaceSessionEntrySync(session, {
+      sessionId: "retained",
+      lifecycleRevision: "reset",
+      updatedAt: 2,
+    });
+    const consume = vi.fn();
+    await expect(
+      reader.withRead({ sessionKeys: [session.sessionKey] }, () => {}, consume),
+    ).rejects.toThrow(/changed/iu);
+    expect(consume).not.toHaveBeenCalled();
+  } finally {
+    await admission.release();
+  }
   expect(
     await execution.runExisting(source, (scope) =>
       scope.execute({ type: "session.entry.read", input: { sessionKeys: ["still-healthy"] } }),
