@@ -32,7 +32,7 @@ afterEach(async () => {
 });
 
 it.skipIf(process.platform === "win32")(
-  "recovers a killed run and replies",
+  "recovers a killed run and replies to a queued message",
   async () => {
     const state = createQaBusState();
     const transport = createQaChannelTransport(state);
@@ -54,6 +54,11 @@ it.skipIf(process.platform === "win32")(
       controlUiEnabled: false,
       mutateConfig: (cfg) => ({
         ...cfg,
+        // This scenario requires a separate reply owner after the recovered turn.
+        messages: {
+          ...cfg.messages,
+          queue: { ...cfg.messages?.queue, mode: "followup" },
+        },
         plugins: {
           ...cfg.plugins,
           slots: { ...cfg.plugins?.slots, memory: "none" },
