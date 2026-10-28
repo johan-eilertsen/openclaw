@@ -32,15 +32,13 @@ const createState = (handler: (params?: unknown) => unknown) =>
     connectionEpoch: 1,
   });
 
-function message(
+const message = (
   role: "assistant" | "user",
   content: unknown,
   id: string,
   seq: number,
   metadata = {},
-) {
-  return { role, content, __openclaw: { id, seq, ...metadata } };
-}
+) => ({ role, content, __openclaw: { id, seq, ...metadata } });
 const sessionInfo = (overrides: Partial<GatewaySessionRow> = {}): GatewaySessionRow => ({
   key: "main",
   kind: "direct",
