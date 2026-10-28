@@ -5,12 +5,14 @@ import { afterEach, expect, it } from "vitest";
 import { startQaBusServer } from "./bus-server.js";
 import { createQaBusState } from "./bus-state.js";
 import { createQaGatewayChild } from "./gateway-child.js";
+import { extractGatewayMessageText } from "./gateway-log-sentinel.js";
 import { isQaPosixProcessGroupAlive, signalQaPosixProcessGroup } from "./posix-process-group.js";
 import { QA_REPEATED_REQUEST_QUEUED_REPLY_MARKER } from "./providers/mock-openai/mock-openai-contracts.js";
 import { startQaMockOpenAiServer } from "./providers/mock-openai/server.js";
 import { createQaChannelTransport } from "./qa-channel-transport.js";
 import { waitForQaTransportCondition } from "./qa-transport.js";
 import {
+  readQaSessionTranscriptEvents,
   readRawQaSessionStore,
   readSessionTranscriptSummary,
 } from "./suite-runtime-agent-session.js";
@@ -128,10 +130,10 @@ it.skipIf(process.platform === "win32")(
     });
     expect(gateway.pid).not.toBe(pid);
     await transport.waitReady({ gateway });
-    await poll(async () =>
+    const recovery = await poll(async () =>
       gateway.logs().includes("dispatching restart-safe recovery") &&
       (await readTranscript()).eventCursor > pending.transcript.eventCursor
-        ? true
+        ? await readEntry()
         : undefined,
     );
     expect(gateway.logs()).toContain("marked 1 startup-orphaned main session(s)");
@@ -145,6 +147,47 @@ it.skipIf(process.platform === "win32")(
       textIncludes: QA_REPEATED_REQUEST_QUEUED_REPLY_MARKER,
       timeoutMs: 180_000,
     });
+    // Observe committed owners after delivery; never treat a steering reservation as adoption.
+    // Keep this bounded and content-free so failed CI retains the missing correlation evidence.
+    try {
+      const { selectedEvents } = await readQaSessionTranscriptEvents({ gateway }, key, {
+        afterEventCursor: pending.transcript.eventCursor,
+      });
+      const transcript = selectedEvents.slice(-32).flatMap((event) => {
+        if (!isRecord(event) || !isRecord(event.message)) {
+          return [];
+        }
+        const message = event.message;
+        const metadata = isRecord(message.__openclaw) ? message.__openclaw : undefined;
+        const provenance = isRecord(message.provenance) ? message.provenance : undefined;
+        const text = extractGatewayMessageText(message);
+        return [
+          {
+            id: event.id,
+            role: message.role,
+            runId: metadata?.runId,
+            steerTargetRunId: metadata?.steerTargetRunId,
+            provenance: provenance?.kind,
+            sourceTool: provenance?.sourceTool,
+            secondInput: text.includes("repeated request queued reply gateway qa check"),
+            matchingFinal: text.includes(QA_REPEATED_REQUEST_QUEUED_REPLY_MARKER),
+          },
+        ];
+      });
+      console.info(
+        "[qa-restart-correlation]",
+        JSON.stringify({
+          recoveryRunId: recovery.restartRecoveryDeliveryRunId,
+          recoverySourceRunId: recovery.restartRecoveryDeliverySourceRunId,
+          secondId: second.id,
+          replyId: reply.id,
+          replyToId: reply.replyToId,
+          transcript,
+        }),
+      );
+    } catch {
+      console.info("[qa-restart-correlation] committed transcript unavailable");
+    }
     expect(reply).toMatchObject({ replyToId: second.id, accountId: transport.accountId });
     const settled = await poll(async () => {
       const entry = await readEntry();
