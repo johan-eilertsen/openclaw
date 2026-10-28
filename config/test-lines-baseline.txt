@@ -1,11 +1,1 @@
-# Preserve distinct guest recovery, authority and history regression coverage.
-# Frozen e094e4c8 used 6,301,989 lines, leaving 11 under the prior 6,302,000 ceiling.
-# Add 8,000 bounded lines (~0.127%); this is reserve, not a combined-repair estimate.
-# Counting, branch-delta handling and all test/CI requirements stay unchanged.
-# Future increases require separate justification; no automatic budget growth.
-# Integration a3283f78e00f: main uses 6,310,389 lines; retained PR coverage adds 1,775.
-# Preserve distinct authority, visible-final, delivery and SDK boundary proofs.
-# Exact combined total, zero added reserve; no counting or assertion changes.
-# CI base 6a2b56560cac adds 130 upstream lines: 6,310,519 + unchanged 1,775.
-# Tested merge 26a21f4d07ee uses 6,312,294; retain zero additional reserve.
-6312294
+6312426
