@@ -6,6 +6,6 @@
 # Increase over the CI-base ceiling: 789 existing debt + 1,114 PR lines + 451 reserve = 2,354.
 # Reserve is below 0.01% of measured use; this is test-resource capacity, not a security waiver.
 # All cases, assertions and counting/gating rules remain unchanged; no automatic budget growth.
-# PR #173026: combined measured use 6,303,336; distinct coverage/diagnostics add 1,813.
+# PR #173026: combined measured use 6,303,341; distinct coverage/diagnostics add 1,818.
 # Main uses 6,301,523 (477 below its ceiling); combined ceiling has zero slack.
-6303336
+6303341

@@ -1,3 +1,4 @@
+import { writeSync } from "node:fs";
 import path from "node:path";
 import { buildAgentSessionKey } from "openclaw/plugin-sdk/routing";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -149,6 +150,7 @@ it.skipIf(process.platform === "win32")(
     });
     // Observe committed owners after delivery; never treat a steering reservation as adoption.
     // Keep this bounded and content-free so failed CI retains the missing correlation evidence.
+    let correlation: Record<string, unknown> = { transcript: "unavailable" };
     try {
       const { selectedEvents } = await readQaSessionTranscriptEvents({ gateway }, key, {
         afterEventCursor: pending.transcript.eventCursor,
@@ -158,7 +160,7 @@ it.skipIf(process.platform === "win32")(
           return [];
         }
         const message = event.message;
-        const metadata = isRecord(message.__openclaw) ? message.__openclaw : undefined;
+        const metadata = isRecord(message["__openclaw"]) ? message["__openclaw"] : undefined;
         const provenance = isRecord(message.provenance) ? message.provenance : undefined;
         const text = extractGatewayMessageText(message);
         return [
@@ -174,19 +176,22 @@ it.skipIf(process.platform === "win32")(
           },
         ];
       });
-      console.info(
-        "[qa-restart-correlation]",
-        JSON.stringify({
-          recoveryRunId: recovery.restartRecoveryDeliveryRunId,
-          recoverySourceRunId: recovery.restartRecoveryDeliverySourceRunId,
-          secondId: second.id,
-          replyId: reply.id,
-          replyToId: reply.replyToId,
-          transcript,
-        }),
-      );
+      correlation = {
+        recoveryRunId: recovery.restartRecoveryDeliveryRunId,
+        recoverySourceRunId: recovery.restartRecoveryDeliverySourceRunId,
+        secondId: second.id,
+        replyId: reply.id,
+        replyToId: reply.replyToId,
+        transcript,
+      };
     } catch {
-      console.info("[qa-restart-correlation] committed transcript unavailable");
+      // Keep the delivery assertion authoritative if the diagnostic read fails.
+    }
+    try {
+      // The e2e configuration silences console output; use the QA bootstrap diagnostic sink.
+      writeSync(2, `[qa-restart-correlation] ${JSON.stringify(correlation)}\n`);
+    } catch {
+      // A diagnostic sink failure must not replace the delivery assertion.
     }
     expect(reply).toMatchObject({ replyToId: second.id, accountId: transport.accountId });
     const settled = await poll(async () => {
