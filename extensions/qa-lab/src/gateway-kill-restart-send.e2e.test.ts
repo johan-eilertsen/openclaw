@@ -1,4 +1,3 @@
-import { writeSync } from "node:fs";
 import path from "node:path";
 import { buildAgentSessionKey } from "openclaw/plugin-sdk/routing";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -6,14 +5,12 @@ import { afterEach, expect, it } from "vitest";
 import { startQaBusServer } from "./bus-server.js";
 import { createQaBusState } from "./bus-state.js";
 import { createQaGatewayChild } from "./gateway-child.js";
-import { extractGatewayMessageText } from "./gateway-log-sentinel.js";
 import { isQaPosixProcessGroupAlive, signalQaPosixProcessGroup } from "./posix-process-group.js";
 import { QA_REPEATED_REQUEST_QUEUED_REPLY_MARKER } from "./providers/mock-openai/mock-openai-contracts.js";
 import { startQaMockOpenAiServer } from "./providers/mock-openai/server.js";
 import { createQaChannelTransport } from "./qa-channel-transport.js";
 import { waitForQaTransportCondition } from "./qa-transport.js";
 import {
-  readQaSessionTranscriptEvents,
   readRawQaSessionStore,
   readSessionTranscriptSummary,
 } from "./suite-runtime-agent-session.js";
@@ -136,10 +133,10 @@ it.skipIf(process.platform === "win32")(
     });
     expect(gateway.pid).not.toBe(pid);
     await transport.waitReady({ gateway });
-    const recovery = await poll(async () =>
+    await poll(async () =>
       gateway.logs().includes("dispatching restart-safe recovery") &&
       (await readTranscript()).eventCursor > pending.transcript.eventCursor
-        ? await readEntry()
+        ? true
         : undefined,
     );
     expect(gateway.logs()).toContain("marked 1 startup-orphaned main session(s)");
@@ -153,51 +150,6 @@ it.skipIf(process.platform === "win32")(
       textIncludes: QA_REPEATED_REQUEST_QUEUED_REPLY_MARKER,
       timeoutMs: 180_000,
     });
-    // Observe committed owners after delivery; never treat a steering reservation as adoption.
-    // Keep this bounded and content-free so failed CI retains the missing correlation evidence.
-    let correlation: Record<string, unknown> = { transcript: "unavailable" };
-    try {
-      const { selectedEvents } = await readQaSessionTranscriptEvents({ gateway }, key, {
-        afterEventCursor: pending.transcript.eventCursor,
-      });
-      const transcript = selectedEvents.slice(-32).flatMap((event) => {
-        if (!isRecord(event) || !isRecord(event.message)) {
-          return [];
-        }
-        const message = event.message;
-        const metadata = isRecord(message["__openclaw"]) ? message["__openclaw"] : undefined;
-        const provenance = isRecord(message.provenance) ? message.provenance : undefined;
-        const text = extractGatewayMessageText(message);
-        return [
-          {
-            id: event.id,
-            role: message.role,
-            runId: metadata?.runId,
-            steerTargetRunId: metadata?.steerTargetRunId,
-            provenance: provenance?.kind,
-            sourceTool: provenance?.sourceTool,
-            secondInput: text.includes("repeated request queued reply gateway qa check"),
-            matchingFinal: text.includes(QA_REPEATED_REQUEST_QUEUED_REPLY_MARKER),
-          },
-        ];
-      });
-      correlation = {
-        recoveryRunId: recovery.restartRecoveryDeliveryRunId,
-        recoverySourceRunId: recovery.restartRecoveryDeliverySourceRunId,
-        secondId: second.id,
-        replyId: reply.id,
-        replyToId: reply.replyToId,
-        transcript,
-      };
-    } catch {
-      // Keep the delivery assertion authoritative if the diagnostic read fails.
-    }
-    try {
-      // The e2e configuration silences console output; use the QA bootstrap diagnostic sink.
-      writeSync(2, `[qa-restart-correlation] ${JSON.stringify(correlation)}\n`);
-    } catch {
-      // A diagnostic sink failure must not replace the delivery assertion.
-    }
     expect(reply).toMatchObject({ replyToId: second.id, accountId: transport.accountId });
     const settled = await poll(async () => {
       const entry = await readEntry();
