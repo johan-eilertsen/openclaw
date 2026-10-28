@@ -15,6 +15,7 @@ import {
   createDiagnosticTraceContext,
   getActiveDiagnosticTraceContext,
 } from "../infra/diagnostic-trace-context.js";
+import { isDiagnosticsTimelineEnabled } from "../infra/diagnostics-timeline.js";
 import {
   bindModelLlmRuntime,
   getModelCompletionOwner,
@@ -23,6 +24,11 @@ import {
 } from "../llm/model-runtime-binding.js";
 import { completeSimple } from "../llm/stream.js";
 import type { AssistantMessage, Model, SimpleStreamOptions } from "../llm/types.js";
+import {
+  assertProviderAuthAuthority,
+  attachProviderAuthAuthority,
+  getProviderAuthAuthority,
+} from "../plugins/provider-auth-authority.js";
 import { createModelLifecycle } from "./embedded-agent-runner/run/attempt.model-diagnostic-lifecycle.js";
 import { createModelObserver } from "./embedded-agent-runner/run/attempt.model-diagnostic-observation.js";
 import type { ResolvedProviderAuth } from "./model-auth.js";
@@ -87,6 +93,7 @@ async function completePreparedModel(params: PreparedCompletionParams): Promise<
   // Direct SDK calls prepare transport hooks before entering the stream facade.
   await import("./ai-transport-runtime-host.js");
   params.assertCurrent?.();
+  assertProviderAuthAuthority(params.auth);
   params.options?.signal?.throwIfAborted();
   const runtime = getModelLlmRuntime(params.model);
   let completionModel =
@@ -99,6 +106,10 @@ async function completePreparedModel(params: PreparedCompletionParams): Promise<
       cfg: params.cfg,
       auth: { mode: params.auth.mode, authFlow: params.auth.authFlow },
     });
+  completionModel = attachProviderAuthAuthority(
+    completionModel,
+    getProviderAuthAuthority(params.auth),
+  );
   if (runtime) {
     completionModel = bindModelLlmRuntime(completionModel, runtime);
   }
@@ -122,7 +133,10 @@ async function completePreparedModel(params: PreparedCompletionParams): Promise<
   if (strictReasoningTags) {
     reasoningTagTextPolicy.markStrict(completionOptions);
   }
-  if (!areDiagnosticsEnabledForProcess() || !hasInternalDiagnosticEventListeners()) {
+  if (
+    !isDiagnosticsTimelineEnabled({ config: params.cfg }) &&
+    (!areDiagnosticsEnabledForProcess() || !hasInternalDiagnosticEventListeners())
+  ) {
     return await completeSimple(
       completionModel,
       params.context,
@@ -146,11 +160,11 @@ async function completePreparedModel(params: PreparedCompletionParams): Promise<
       suppressPluginHooks: true,
     },
     options: completionOptions,
-    createObserver: (capturePromptStats) =>
+    createObserver: (capturePromptStats, captureByteStats) =>
       createModelObserver({
-        config: params.cfg,
         streamContext: params.context,
         capturePromptStats,
+        captureByteStats,
         suppressPluginHooks: true,
       }),
   });

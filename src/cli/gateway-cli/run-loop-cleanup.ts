@@ -1,9 +1,49 @@
 import { MessageChannel } from "node:worker_threads";
+import { measureGatewayCloseStep } from "../../gateway/restart-trace.js";
+import { finishDiagnosticsTimeline } from "../../infra/diagnostics-timeline.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { cleanupSnapshotOperations } from "../../infra/sqlite-readonly-location-cleanup.js";
 import type { SubsystemLogger } from "../../logging/subsystem.js";
 import { flushGatewayLogsBeforeExit } from "./run-loop-exit.js";
 import type { ShutdownHardExitWatchdog } from "./shutdown-hard-exit.js";
+
+/** Called only after settleFinalResources has joined every admitted cleanup owner. */
+export function finishGatewayRunCleanup(params: {
+  cleanup: Pick<ReturnType<typeof createGatewayRunCleanup>, "drained" | "failed">;
+  failures: unknown[];
+  loopFailure?: { error: unknown };
+  hostExitRequested: boolean;
+  hostExitCode: number;
+  terminalExitCode: number | undefined;
+  ownsProcessLifecycle: boolean | undefined;
+}): number {
+  const { cleanup, failures, loopFailure, hostExitRequested, hostExitCode, terminalExitCode } =
+    params;
+  if (loopFailure) {
+    failures.unshift(loopFailure.error);
+  }
+  const code = hostExitRequested && terminalExitCode === 0 ? hostExitCode : (terminalExitCode ?? 0);
+  // Foreground completion and process exit are not producer barriers. This follows
+  // canonical close, detached work, and retained cleanup, including failed joins.
+  finishDiagnosticsTimeline(
+    params.ownsProcessLifecycle === true &&
+      cleanup.drained &&
+      !cleanup.failed &&
+      failures.length === 0 &&
+      code === 0,
+  );
+  if (failures.length === 1) {
+    throw failures[0];
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "Gateway loop and final resource cleanup failed", {
+      cause: failures[0],
+    });
+  }
+  // Cleanup failure promotes success, but cannot replace a supervisor-owned
+  // failure status that already selects its terminal recovery behavior.
+  return cleanup.failed && code === 0 ? 1 : code;
+}
 
 /** Retains accepted cleanup, including native watchdog cancellation, until its real settlement. */
 export function createGatewayRunCleanup(
@@ -33,24 +73,30 @@ export function createGatewayRunCleanup(
   };
   const retireWatchdog = (watchdog: ShutdownHardExitWatchdog | null) => {
     if (watchdog) {
-      retainCleanup(watchdog.cancel());
+      retainCleanup(measureGatewayCloseStep("restart.close.watchdog", () => watchdog.cancel()));
     }
   };
   const joinCleanup = async () => {
-    while (pendingCleanup.size > 0) {
-      await Promise.allSettled(pendingCleanup);
-    }
+    await measureGatewayCloseStep("restart.close.retained-cleanup", async () => {
+      while (pendingCleanup.size > 0) {
+        await Promise.allSettled(pendingCleanup);
+      }
+    });
   };
   const drainProcessResources = async () => {
     // Retained callbacks remain callable after an update replaces on-disk chunks.
     if (!isForegroundUpdateClosed()) {
-      await runtime.stopActiveManagedProviderLocalServices().catch((error: unknown) => {
+      await measureGatewayCloseStep("restart.close.provider-local-services", () =>
+        runtime.stopActiveManagedProviderLocalServices(),
+      ).catch((error: unknown) => {
         cleanupFailed = true;
         logger.warn(`managed local service shutdown failed: ${formatErrorMessage(error)}`);
       });
     }
-    await cleanupSnapshotOperations();
-    await flushGatewayLogsBeforeExit(logger);
+    await measureGatewayCloseStep("restart.close.snapshots", cleanupSnapshotOperations);
+    await measureGatewayCloseStep("restart.close.log-flush", () =>
+      flushGatewayLogsBeforeExit(logger),
+    );
     processResourcesDrained = true;
   };
   return {
@@ -71,23 +117,23 @@ export function createGatewayRunCleanup(
     }): Promise<unknown[]> {
       const failures: unknown[] = [];
       // Every admitted owner gets its ordered retirement even if an earlier one rejects.
-      const finalizers: Array<() => void | Promise<void>> = [
-        operations.retireSignals,
-        operations.drainSignals,
-        joinCleanup,
-        operations.closeTerminalServer,
-        operations.retireHost,
-        joinCleanup,
-        operations.closeSharedState,
-        operations.releaseLock,
-        operations.clearStartupWatchdog,
-        operations.clearRequestWatchdogs,
-        joinCleanup,
-        operations.cleanupSignals,
+      const finalizers: Array<[string, () => void | Promise<void>]> = [
+        ["retire-signals", operations.retireSignals],
+        ["drain-signals", operations.drainSignals],
+        ["retained-cleanup", joinCleanup],
+        ["terminal-server", operations.closeTerminalServer],
+        ["host", operations.retireHost],
+        ["retained-cleanup", joinCleanup],
+        ["shared-state", operations.closeSharedState],
+        ["release-lock", operations.releaseLock],
+        ["startup-watchdog", operations.clearStartupWatchdog],
+        ["request-watchdogs", operations.clearRequestWatchdogs],
+        ["retained-cleanup", joinCleanup],
+        ["cleanup-signals", operations.cleanupSignals],
       ];
-      for (const operation of finalizers) {
+      for (const [name, operation] of finalizers) {
         try {
-          await operation();
+          await measureGatewayCloseStep(`restart.close.final.${name}`, operation);
         } catch (error) {
           cleanupFailed = true;
           failures.push(error);

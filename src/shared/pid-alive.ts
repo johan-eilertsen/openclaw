@@ -67,12 +67,17 @@ function isValidPid(pid: number): boolean {
   return Number.isInteger(pid) && pid > 0;
 }
 
+// Android (Termux) runs the Linux kernel and reports its own process.platform.
+function hasLinuxProcfs(): boolean {
+  return process.platform === "linux" || process.platform === "android";
+}
+
 /**
- * Check whether a Linux task is terminal and has no live sibling threads.
+ * Reject recycled worker TIDs and terminal leaders without live sibling threads.
  * Missing or reaped procfs snapshots require a fresh existence probe.
  */
 function isExitedLinuxProcess(pid: number): boolean {
-  if (process.platform !== "linux") {
+  if (!hasLinuxProcfs()) {
     return false;
   }
   try {
@@ -80,9 +85,14 @@ function isExitedLinuxProcess(pid: number): boolean {
     const state = status.match(/^State:\s+(\S)/m)?.[1];
     const threads = status.match(/^Threads:[ \t]+(\d+)[ \t]*$/m)?.[1];
     if (threads !== "0") {
+      // process.pid records a leader; kill(pid, 0) also accepts recycled worker TIDs.
+      const tgid = status.match(/^Tgid:[ \t]+(\d+)[ \t]*$/m)?.[1];
       // pthread_exit can leave a terminal leader with live workers. Reaping also
       // moves the last retained task from Z to X before removing its PID.
-      return (state === "Z" || state === "X") && threads === "1";
+      return (
+        (tgid !== undefined && Number(tgid) !== pid) ||
+        ((state === "Z" || state === "X") && threads === "1")
+      );
     }
   } catch {
     // Reaping can remove procfs after the caller's existence probe.
@@ -173,7 +183,7 @@ function getDarwinProcessStartTime(
 
 /** Read the Linux procfs start identity used by Linux-owned runtime state. */
 export function getProcessStartTime(pid: number): number | null {
-  if (!isValidPid(pid) || process.platform !== "linux") {
+  if (!isValidPid(pid) || !hasLinuxProcfs()) {
     return null;
   }
   try {
@@ -199,7 +209,7 @@ export function getProcessInstanceStartTime(pid: number): number | null {
   if (!isValidPid(pid)) {
     return null;
   }
-  if (process.platform === "linux") {
+  if (hasLinuxProcfs()) {
     const startedAt = getProcessStartTime(pid);
     return Number.isSafeInteger(startedAt) ? startedAt : null;
   }

@@ -230,15 +230,12 @@ export async function projectCostUsageSummary(
       totals,
     });
   }
-  const refreshedAt = reader.refreshedAt();
-  fillMissingDays(daily, params.startMs, params.endMs, formatDay);
-  return {
-    updatedAt: Date.now(),
-    days: countCalendarDays(params.startMs, params.endMs, formatDay),
-    daily: Array.from(daily, ([date, bucket]) => Object.assign({ date }, bucket)).toSorted((a, b) =>
-      a.date.localeCompare(b.date),
-    ),
+  return finishUsageCostSummary({
+    daily,
     totals,
+    startMs: params.startMs,
+    endMs: params.endMs,
+    formatDay,
     cacheStatus: {
       status:
         staleFiles === 0 && deferredFiles === 0
@@ -249,8 +246,30 @@ export async function projectCostUsageSummary(
       cachedFiles,
       pendingFiles: staleFiles + deferredFiles,
       staleFiles,
-      refreshedAt,
+      refreshedAt: reader.refreshedAt(),
     },
+  });
+}
+
+/** Zero-fill the requested calendar and order daily totals for `usage.cost`. */
+export function finishUsageCostSummary(params: {
+  daily: Map<string, CostUsageTotals>;
+  totals: CostUsageTotals;
+  startMs: number;
+  endMs: number;
+  formatDay: UsageDayKeyFormatter;
+  cacheStatus: UsageCacheStatus;
+}): CostUsageSummary {
+  const { daily, formatDay } = params;
+  fillMissingDays(daily, params.startMs, params.endMs, formatDay);
+  return {
+    updatedAt: Date.now(),
+    days: countCalendarDays(params.startMs, params.endMs, formatDay),
+    daily: Array.from(daily, ([date, bucket]) => Object.assign({ date }, bucket)).toSorted((a, b) =>
+      a.date.localeCompare(b.date),
+    ),
+    totals: params.totals,
+    cacheStatus: params.cacheStatus,
   };
 }
 

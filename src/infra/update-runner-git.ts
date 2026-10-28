@@ -1,3 +1,4 @@
+import { classifyDoctorMaintenanceRefusal } from "../commands/doctor-maintenance-inspection.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import { resolveControlUiAssetHealth } from "./control-ui-assets.js";
 import { readPackageVersion } from "./package-json.js";
@@ -26,6 +27,7 @@ import {
 import {
   runGitActivationBranchCheckStep,
   runGitCleanCheckStep,
+  readGitRollbackPreservation,
   runGitRollbackSteps,
   runGitUpstreamStep,
 } from "./update-runner-git-steps.js";
@@ -203,18 +205,21 @@ export async function updateGitCheckout(params: {
     runtimeSha = beforeSha,
     source?: { sha: string; branch: string | null },
   ) => {
-    const restoreSource = () =>
-      runGitRollbackSteps({
-        beforeSha,
-        branch,
-        gitRoot,
-        createdDevBranchDuringUpdate,
-        sourceTreeStagingPaths: runtimePromotion?.sourceTreeStagingPaths,
-        recoveryStep,
-        checkSourceUnchanged,
-        assertCurrent,
-        activatedSource: source,
-      });
+    const rollback = {
+      beforeSha,
+      branch,
+      gitRoot,
+      createdDevBranchDuringUpdate,
+      sourceTreeStagingPaths: runtimePromotion?.sourceTreeStagingPaths,
+      recoveryStep,
+      checkSourceUnchanged,
+      assertCurrent,
+      activatedSource: source,
+    };
+    const restoreSource = () => runGitRollbackSteps(rollback);
+    // Check before runtime restoration rewrites tracked output.
+    const preserved = source ? undefined : await readGitRollbackPreservation(rollback);
+    steps.push(...(preserved ? [preserved] : []));
     // Retained rollback must settle every source/ref fence before changing runtime.
     let sourceRestored = source ? await restoreSource() : false;
     let runtimeRestored = true;
@@ -226,7 +231,7 @@ export async function updateGitCheckout(params: {
       steps.push(failureStep("git-runtime-rollback", "restore previous runtime", String(error)));
     }
     // Immediate activation recovery reconstructs tracked output after runtime restoration.
-    if (!source) {
+    if (!source && !preserved) {
       sourceRestored = await restoreSource();
     }
     recovery = !sourceRestored
@@ -334,7 +339,6 @@ export async function updateGitCheckout(params: {
     }
     return undefined;
   };
-
   const runUpdate = async (): Promise<UpdateRunResult> => {
     const inspectAndPrepare = async (
       inspectionRoot: string,
@@ -610,16 +614,25 @@ export async function updateGitCheckout(params: {
     // Source conversion migrates only after its prepared global exposure is swapped.
     if (!opts.prepareGitExposure) {
       stateMigrationStarted = true;
-      recovery = { serviceRestartSafe: false, reason: "state-migration-started" };
+      recovery = {
+        serviceRestartSafe: false,
+        reason: "state-migration-started",
+        dataAtRisk: "state-migrated-no-rollback",
+      };
       const doctorSteps: UpdateStepResult[] = [];
       let doctorStep: UpdateStepResult | null;
       try {
         doctorStep = await opts.runGitDoctor(gitRoot, doctorSteps);
       } catch (error) {
+        const refusal = classifyDoctorMaintenanceRefusal(error);
+        if (refusal.kind === "data-at-risk") {
+          recovery.dataAtRisk = refusal.reason;
+        }
         steps.push(...doctorSteps);
         throw error;
       }
       steps.push(
+        ...doctorSteps.filter((result) => result !== doctorStep),
         doctorStep ??
           failureStep(
             "openclaw doctor",

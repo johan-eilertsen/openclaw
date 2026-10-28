@@ -1,7 +1,8 @@
 import type { JSX } from "@solidjs/web";
+import { onSettled } from "solid-js";
 import { Icon } from "../../components/solid/icon.tsx";
 import { registerPluginManagementEnglish } from "../../i18n/locales/en-plugin-management.ts";
-import { shouldHandleNavigationClick } from "../../lib/navigation-click.ts";
+import { handleNavigationClick } from "../../lib/navigation-click.ts";
 import { t, registerEnglishCatalog } from "../../lib/reactive/i18n.ts";
 
 registerEnglishCatalog(registerPluginManagementEnglish);
@@ -17,13 +18,7 @@ export function renderPluginDetailBreadcrumb(props: {
       <a
         class="plugins-settings-breadcrumb__parent"
         href={props.backHref}
-        onClick={(event: MouseEvent) => {
-          if (!shouldHandleNavigationClick(event)) {
-            return;
-          }
-          event.preventDefault();
-          props.onBack();
-        }}
+        onClick={(event: MouseEvent) => handleNavigationClick(event, () => props.onBack())}
       >
         {props.backLabel}
       </a>
@@ -38,6 +33,7 @@ export function renderPluginDetailBreadcrumb(props: {
 }
 
 export function renderPluginDetailShell(props: {
+  registerRemovalHeading?: (heading: HTMLHeadingElement) => () => void;
   id: string;
   name: string;
   summary?: string;
@@ -45,12 +41,15 @@ export function renderPluginDetailShell(props: {
   backLabel: string;
   onBack: () => void;
   titleAction?: JSX.Element;
+  notice?: JSX.Element;
   identity: JSX.Element | undefined;
   icon?: JSX.Element;
   readme?: JSX.Element;
   sidebar?: JSX.Element;
   panel: JSX.Element;
 }): JSX.Element {
+  let heading!: HTMLHeadingElement;
+  onSettled(() => props.registerRemovalHeading?.(heading));
   const titleId = () => `${props.id}-title`;
   return (
     <section
@@ -66,12 +65,15 @@ export function renderPluginDetailShell(props: {
         ) : undefined}
         <div class="plugin-catalog-detail__heading">
           <div class="plugin-catalog-detail__title-row">
-            <h1 id={titleId()}>{props.name}</h1>
+            <h1 id={titleId()} ref={(element) => (heading = element)}>
+              {props.name}
+            </h1>
           </div>
           {props.identity}
           {props.summary ? (
             <p class="plugin-catalog-detail__summary">{props.summary}</p>
           ) : undefined}
+          {props.notice}
           <div class="plugin-catalog-detail__actions">{props.titleAction ?? undefined}</div>
         </div>
       </div>

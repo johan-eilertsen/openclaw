@@ -2,10 +2,8 @@ import { randomUUID } from "node:crypto";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { applySessionEntryTargetOperation } from "../config/sessions/session-accessor.sqlite-entry.js";
 import { resolveSqliteSessionKey } from "../config/sessions/session-accessor.sqlite-scope-helpers.js";
-import {
-  acquireSessionActorStorage,
-  captureSessionActorStorageOwner,
-} from "../config/sessions/session-actor-storage-binding.js";
+import { acquireSessionActorStorage } from "../config/sessions/session-actor-storage-acquisition.js";
+import { captureSessionActorStorageOwner } from "../config/sessions/session-actor-storage-binding.js";
 import { buildSessionCreationStamp } from "../config/sessions/session-entry-provenance.js";
 import type { CapturedSessionEntryReadSource } from "../config/sessions/session-entry-read-source.types.js";
 import type { SessionPendingInputAuthorityFacts } from "../config/sessions/session-pending-input-authority.js";
@@ -38,7 +36,8 @@ import type {
   AgentDatabaseRequestExecutionSource,
   OpenClawAgentDatabaseAdmissionExecution,
 } from "../state/openclaw-agent-execution-admission-contract.js";
-import { captureOpenClawAgentDatabaseExecution } from "../state/openclaw-agent-execution.js";
+import { toAgentExecutionConstraints } from "../state/openclaw-agent-execution-scope.js";
+import { captureOpenClawAgentDatabasePreparationExecution } from "../state/openclaw-agent-execution.js";
 import {
   runOpenClawAgentWorkerWrite,
   runOpenClawAgentWriteAdmission,
@@ -54,6 +53,7 @@ import {
   captureClientVoiceEntrySource,
   createClientVoiceSessionSource,
   prepareClientVoiceSessionSourceChecks,
+  selectPreparedClientVoiceSource,
   type ClientVoiceSessionSource,
 } from "./client-voice-session-source.js";
 import type { ClientVoiceSessionRecord } from "./client-voice-session-store.js";
@@ -69,18 +69,9 @@ export function captureClientVoiceSessionWriter(params: {
   const options = captured.options;
   captured.assertCurrent();
   const existing = captured.identity.key.startsWith("file:");
-  const execution = captureOpenClawAgentDatabaseExecution(
+  const execution = captureOpenClawAgentDatabasePreparationExecution(
     options,
-    existing
-      ? {
-          expectedIdentity: {
-            kind: "file",
-            physicalIdentity: captured.identity.key.slice("file:".length),
-            birthtime: captured.identity.birthtime,
-            nativeLocation: captured.identity.canonicalPath,
-          },
-        }
-      : { expectedCreationIdentity: captured.identity },
+    toAgentExecutionConstraints(captured.identity).expectedIdentity,
   );
   const assertCurrent = () => {
     assertClientVoiceSessionSettlementCurrent(captured.settlementContext);
@@ -502,22 +493,7 @@ export async function mutateAuthorizedClientVoiceSession<T>(
           if (!workerGrant?.transaction) {
             resources.push(authority);
           }
-          const preparedSources = [
-            ...authority.checks.map(({ predicate }) => predicate.source),
-            ...(authority.transaction ? [authority.transaction.source] : []),
-          ].filter((source) =>
-            [...sourceIdentities.values()].some(
-              (identity) =>
-                typeof source.databaseIdentity === "string" &&
-                identity.key === `file:${source.databaseIdentity}` &&
-                identity.birthtime === source.databaseBirthtime,
-            ),
-          );
-          const preparedSource = preparedSources.every(
-            (source) => source.databaseIdentity === preparedSources[0]?.databaseIdentity,
-          )
-            ? preparedSources[0]
-            : undefined;
+          const preparedSource = selectPreparedClientVoiceSource(authority, sourceIdentities);
           const canonical = resolveUnsuffixedSqliteTargetFromSessionStorePath(
             params.source.storePath,
           );

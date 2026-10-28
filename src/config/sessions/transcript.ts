@@ -42,10 +42,10 @@ import type {
   LatestTranscriptAssistantText,
   SessionTranscriptReadScope,
 } from "./session-accessor.types.js";
+import { withSessionActorStorage } from "./session-actor-storage-acquisition.js";
 import {
   captureSessionActorStorageOwner,
   getSessionActorStorageBinding,
-  withSessionActorStorage,
 } from "./session-actor-storage-binding.js";
 import { withSessionEntryReadOnlyInWorker } from "./session-entry-read-runtime.js";
 import { readActiveTranscriptEntryAnchorAsync } from "./session-transcript-anchor-read.js";
@@ -67,9 +67,12 @@ import {
 import {
   resolveMirroredTranscriptText,
   type SessionTranscriptDeliveryMirror,
+  type SubagentCompletionDirectDeliveryMirror,
 } from "./transcript-mirror.js";
 import type {
   ReadRecentSessionConversationTextOptions,
+  ReadRecentSessionConversationTurnOptions,
+  SessionRecentConversationTurn,
   SessionRecentConversationText,
 } from "./transcript-recent-text.js";
 import { streamSessionTranscriptLinesReverse } from "./transcript-stream.js";
@@ -98,6 +101,7 @@ export type SessionTranscriptAppendResult =
 export type SessionTranscriptUpdateMode = "inline" | "file-only" | "none";
 type InternalSessionTranscriptDeliveryMirror =
   | SessionTranscriptDeliveryMirror
+  | SubagentCompletionDirectDeliveryMirror
   | {
       kind: "message-tool-source-reply";
       final: boolean;
@@ -153,8 +157,8 @@ function parseAssistantTranscriptText(line: string): LatestAssistantTranscriptTe
 async function readRecentUserAssistantTextFromSqliteTranscript(
   scope: SessionTranscriptReadScope,
   assertCurrent: () => void,
-  options: ReadRecentSessionConversationTextOptions = {},
-): Promise<SessionRecentConversationText[]> {
+  options: ReadRecentSessionConversationTurnOptions = {},
+): Promise<SessionRecentConversationTurn[]> {
   try {
     const { readRecentSessionConversationTextAsync } =
       await import("../../gateway/session-transcript-readers.js");
@@ -172,9 +176,17 @@ async function readRecentUserAssistantTextFromSqliteTranscript(
   }
 }
 
-export async function readRecentUserAssistantTextForSession(
+export function readRecentUserAssistantTextForSession(
   params: ReadRecentSessionConversationTextParams,
 ): Promise<SessionRecentConversationText[]> {
+  return readRecentUserAssistantTurnsForSession(params, false);
+}
+
+/** Internal channel reconciliation projection; the SDK reader above stays text-only. */
+export async function readRecentUserAssistantTurnsForSession(
+  params: ReadRecentSessionConversationTextParams,
+  includeTurnIdentity = true,
+): Promise<SessionRecentConversationTurn[]> {
   const sessionKey = params.sessionKey.trim();
   if (!sessionKey) {
     return [];
@@ -210,7 +222,7 @@ export async function readRecentUserAssistantTextForSession(
           env: owner.scope?.env,
         },
         owner.assertCurrent,
-        params,
+        { ...params, includeTurnIdentity },
       );
       owner.assertCurrent();
       return result;

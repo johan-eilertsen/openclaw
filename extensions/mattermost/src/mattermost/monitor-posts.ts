@@ -2,15 +2,19 @@ import {
   formatInboundEnvelope,
   formatInboundFromLabel,
   implicitMentionKindWhen,
+  resolveInboundMentionDecision,
   resolveInboundSessionEnvelopeContextAsync,
   toInboundMediaFactsWithMetadata,
+  type ChannelBotLoopProtectionFacts,
 } from "openclaw/plugin-sdk/channel-inbound";
+import { resolveChannelImplicitMentions } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import { resolveBotThreadMentionPolicy } from "openclaw/plugin-sdk/channel-mention-gating";
 import {
   resolveChannelGroups,
   resolveChannelGroupsConfigPath,
 } from "openclaw/plugin-sdk/channel-policy";
 import { resolvePromptHistoryLimit } from "openclaw/plugin-sdk/number-runtime";
+import { mergePairLoopGuardConfig } from "openclaw/plugin-sdk/pair-loop-guard-runtime";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "openclaw/plugin-sdk/security-runtime";
 import {
   normalizeOptionalString,
@@ -19,13 +23,11 @@ import {
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { MattermostPostSchema } from "./client.js";
 import { normalizeMattermostAllowEntry } from "./ingress-identity.js";
-import { resolveMattermostInboundMentionDecision } from "./monitor-activation.js";
 import {
   formatMattermostDirectMessageDropLog,
   resolveMattermostMonitorInboundAccess,
   shouldRetainMattermostSenderHistory,
 } from "./monitor-auth.js";
-import { resolveMattermostPendingHistoryKey } from "./monitor-context.js";
 import { buildMattermostEventPlan } from "./monitor-event-plan.js";
 import {
   matchesMattermostBotMention,
@@ -112,11 +114,24 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       return;
     }
     const { channelDisplay, kind, roomLabel, route, thread } = eventPlan;
+    // The server stamps from_bot on every post created by a bot account.
+    const isBotPost = post.props?.from_bot === "true";
+    const channelBotConfig = kind === "direct" ? undefined : account.config.groups?.[channelId];
+    const wildcardBotConfig = kind === "direct" ? undefined : account.config.groups?.["*"];
+    const allowBots =
+      channelBotConfig?.allowBots ??
+      wildcardBotConfig?.allowBots ??
+      account.config.allowBots ??
+      true;
+    if (isBotPost && allowBots === false) {
+      monitor.logVerboseMessage(`mattermost: drop bot post (allowBots=false sender=${senderId})`);
+      return;
+    }
     const senderName =
       normalizeOptionalString(payload.data?.sender_name) ??
       normalizeOptionalString((await resolveUserInfo(senderId))?.username) ??
       senderId;
-    const rawPostText = typeof post.message === "string" ? post.message : "";
+    const rawPostText = post.message ?? "";
     const rawText = normalizeOptionalString(rawPostText) ?? "";
     // "@bot /new" addresses the bot, then issues a command: strip the mention before
     // detection and CommandBody, or the leading-slash check fails and the model gets prose.
@@ -127,11 +142,9 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       agentId: route.agentId,
       sessionKey,
     });
-    const historyKey = resolveMattermostPendingHistoryKey({
-      kind,
-      sessionKey,
-      threadRootId: effectiveReplyToId,
-    });
+    // Flat DMs dispatch immediately. Opted-in threads have an independent session
+    // and need a recoverable context window just like room threads.
+    const historyKey = kind === "direct" && !effectiveReplyToId ? null : sessionKey;
     const fileIds = uniqueStrings(normalizeTrimmedStringList(post.file_ids ?? []));
     const nativeMedia = fileIds.map(() => ({}));
     const pendingBody = formatMattermostPendingMediaText({ body: rawText, media: nativeMedia });
@@ -145,7 +158,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
             ? {
                 sender: senderName,
                 body: trimmed,
-                timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
+                timestamp: post.create_at ?? undefined,
                 messageId: post.id,
               }
             : null,
@@ -320,18 +333,26 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       implicitMentionKinds: implicitMentionKindWhen("bot_thread_participant", threadAlreadyEngaged),
     });
     const botThreadMentionRequired = isBotOwnedThread && requireMentionInBotThreads === true;
-    const mentionDecision = resolveMattermostInboundMentionDecision({
+    const implicitMentions = resolveChannelImplicitMentions({
       cfg,
+      channel: "mattermost",
       accountId: account.accountId,
-      kind,
-      requireMention: botThreadPolicy.requireMention,
-      // Explicit bot-thread requirements stay closed when no mention detector is available.
-      canDetectMention: canDetectMention || oncharEnabled || botThreadMentionRequired,
-      wasMentioned: wasMentioned || oncharTriggered,
-      implicitMentionKinds: botThreadPolicy.implicitMentionKinds,
-      allowTextCommands,
-      hasControlCommand: isControlCommand,
-      commandAuthorized,
+    });
+    const mentionDecision = resolveInboundMentionDecision({
+      facts: {
+        // Explicit bot-thread requirements stay closed when no mention detector is available.
+        canDetectMention: canDetectMention || oncharEnabled || botThreadMentionRequired,
+        wasMentioned: wasMentioned || oncharTriggered,
+        implicitMentionKinds: botThreadPolicy.implicitMentionKinds,
+      },
+      policy: {
+        isGroup: kind !== "direct",
+        requireMention: botThreadPolicy.requireMention,
+        implicitMentions,
+        allowTextCommands,
+        hasControlCommand: isControlCommand,
+        commandAuthorized,
+      },
     });
     const { shouldBypassMention } = mentionDecision;
 
@@ -357,6 +378,21 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
         onceKey: JSON.stringify([account.accountId, channelId]),
         hint: `Mention patterns can be derived from the agent identity name. Set ${groupsConfigPath}[${JSON.stringify(channelId)}].${botThreadMentionRequired ? "requireMentionInBotThreads" : "requireMention"}=false to process messages without a mention. Preserve existing groups entries; when adding the first groups map, include "*": {} to keep other chats admitted.`,
       });
+      recordPendingHistory();
+      return;
+    }
+    // Thread participation and implicit mentions do not count here: two bots that both
+    // replied in one thread would otherwise keep waking each other.
+    if (
+      isBotPost &&
+      allowBots === "mentions" &&
+      kind !== "direct" &&
+      !wasMentioned &&
+      !oncharTriggered
+    ) {
+      monitor.logVerboseMessage(
+        `mattermost: drop bot post (allowBots=mentions, missing mention channel=${channelId} sender=${senderId})`,
+      );
       recordPendingHistory();
       return;
     }
@@ -399,7 +435,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
     const body = formatInboundEnvelope({
       channel: "Mattermost",
       from: fromLabel,
-      timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
+      timestamp: post.create_at ?? undefined,
       body: textWithId,
       chatType: kind,
       sender: { name: senderName, id: senderId },
@@ -482,7 +518,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       MessageSidFirst: allMessageIds.length > 1 ? allMessageIds[0] : undefined,
       MessageSidLast:
         allMessageIds.length > 1 ? allMessageIds[allMessageIds.length - 1] : undefined,
-      Timestamp: typeof post.create_at === "number" ? post.create_at : undefined,
+      Timestamp: post.create_at ?? undefined,
       WasMentioned: kind !== "direct" ? mentionDecision.effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       // Tag typed text-slash control commands (e.g. ` /new`, ` /reset` sent via the regular
@@ -503,6 +539,23 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
     monitor.logVerboseMessage(
       `mattermost inbound: from=${ctxPayload.From} id=${post.id} len=${bodyText.length}`,
     );
+    const botLoopProtection: ChannelBotLoopProtectionFacts | undefined = isBotPost
+      ? {
+          scopeId: account.accountId,
+          conversationId: channelId,
+          senderId,
+          receiverId: botUserId,
+          eventId: post.id,
+          config: mergePairLoopGuardConfig(
+            account.config.botLoopProtection,
+            wildcardBotConfig?.botLoopProtection,
+            channelBotConfig?.botLoopProtection,
+          ),
+          defaultsConfig: cfg.channels?.defaults?.botLoopProtection,
+          defaultEnabled: true,
+          nowMs: post.create_at ?? undefined,
+        }
+      : undefined;
 
     await dispatchMattermostInboundTurn(monitor, {
       post,
@@ -513,6 +566,7 @@ export function createMattermostPostHandler(monitor: MattermostMonitorContext) {
       historyLimit,
       channelHistories,
       pinnedMainDmOwner,
+      botLoopProtection,
       turnAdoptionLifecycle,
     });
   };

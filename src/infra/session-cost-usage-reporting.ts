@@ -21,10 +21,8 @@ import {
   resolveSessionFilePathCore,
   resolveSessionTranscriptsDirForAgent,
 } from "../config/sessions/paths.js";
-import {
-  captureSessionActorStorageOwner,
-  withSessionActorStorage,
-} from "../config/sessions/session-actor-storage-binding.js";
+import { withSessionActorStorage } from "../config/sessions/session-actor-storage-acquisition.js";
+import { captureSessionActorStorageOwner } from "../config/sessions/session-actor-storage-binding.js";
 import { withSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import { prepareSqliteTargetFromSessionStorePath } from "../config/sessions/session-sqlite-target.js";
 import { loadSessionTranscriptEvents } from "../config/sessions/session-transcript-events.js";
@@ -34,7 +32,6 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
-import { sleep } from "../utils/sleep.js";
 import { refreshCostUsageCacheForAgent } from "./session-cost-usage-aggregation.js";
 import {
   createUsageCostResolver,
@@ -56,8 +53,6 @@ import type {
   UsageDailyBucket,
 } from "./session-cost-usage.types.js";
 
-const USAGE_COST_DIRECT_REFRESH_RETRY_MS = 25;
-
 type SessionUsageDiagnosticParams = {
   sessionId?: string;
   sessionFile?: string;
@@ -73,14 +68,11 @@ async function withSessionUsageDiagnosticSource<
   read: (scoped: Params, sessionFile: string) => Promise<Result>,
 ): Promise<Result | null> {
   const source = await resolveUsageSessionSource(params);
-  if (
-    !source ||
-    (!parseSqliteSessionFileMarker(source.sessionFile) && !fs.existsSync(source.sessionFile))
-  ) {
+  const marker = source && parseSqliteSessionFileMarker(source.sessionFile);
+  if (!source || (!marker && !fs.existsSync(source.sessionFile))) {
     return null;
   }
   const signal = getAsyncWorkSignal();
-  const marker = parseSqliteSessionFileMarker(source.sessionFile);
   const memory =
     marker &&
     captureSessionActorStorageOwner(marker, {
@@ -98,10 +90,13 @@ export async function discoverAllSessions(params: {
   agentId: string;
   startMs?: number;
   endMs?: number;
+  /** False skips transcript statistics; overview reads take freshness from the cache worker. */
+  statistics?: false;
 }): Promise<DiscoveredSession[]> {
   const result = await runUsageCostWorker(prepareUsageCostWorker(params), {
     kind: "inventory",
     minMtimeMs: params.startMs,
+    statistics: params.statistics,
   });
   if (result.kind !== "inventory") {
     throw new Error("Usage worker returned an invalid session inventory");
@@ -172,22 +167,17 @@ export async function loadSessionCostSummary(params: {
   if (inventory.files.length === 0) {
     return null;
   }
-  while (
-    (await refreshCostUsageCacheForAgent({
-      config: params.config,
-      agentId: params.agentId,
-      agentDir: prepared.agentDir,
-      databasePath: prepared.location.databasePath,
-      storePath: prepared.location.storePath,
-      env: prepared.location.env,
-      sessionFiles: [sessionFile],
-      sessionActor: prepared.sessionActor,
-    })) === "busy"
-  ) {
-    // Direct detail callers require the requested session, unlike background
-    // summary refreshes. Wait for the agent-wide writer to release, then retry.
-    await sleep(USAGE_COST_DIRECT_REFRESH_RETRY_MS);
-  }
+  await refreshCostUsageCacheForAgent({
+    config: params.config,
+    agentId: params.agentId,
+    agentDir: prepared.agentDir,
+    databasePath: prepared.location.databasePath,
+    storePath: prepared.location.storePath,
+    env: prepared.location.env,
+    sessionFiles: [sessionFile],
+    sessionActor: prepared.sessionActor,
+    waitForRefresh: true,
+  });
   const pricingFingerprint = await resolveUsageCostPricingFingerprint(
     prepared.config,
     prepared.agentDir,
@@ -291,12 +281,11 @@ export async function loadSessionLogs(
   return withSessionUsageDiagnosticSource(params, async (scoped, sessionFile) => {
     const logs: SessionLogEntry[] = [];
     if (scoped.limit !== undefined && scoped.limit !== null) {
-      if (!Number.isFinite(scoped.limit) || scoped.limit <= 0) {
+      if (!Number.isInteger(scoped.limit) || scoped.limit <= 0) {
         return [];
       }
     }
     const limit = scoped.limit ?? 50;
-    const boundedLimit = Number.isInteger(limit);
     const retentionLimit = limit * 2;
     const agentDir = resolveAgentDir(scoped.config ?? {}, scoped.agentId);
     const resolveCost = createUsageCostResolver({ config: scoped.config, agentDir });
@@ -389,7 +378,6 @@ export async function loadSessionLogs(
           content = truncateUtf16Safe(content, maxLen) + "…";
         }
       } catch {
-        // Ignore malformed records.
         continue;
       }
 
@@ -410,7 +398,7 @@ export async function loadSessionLogs(
       });
       // Timestamps can arrive out of order, so keep a bounded sorted window instead
       // of relying on transcript append order or retaining the whole file.
-      if (boundedLimit && logs.length > retentionLimit) {
+      if (logs.length > retentionLimit) {
         logs.sort((a, b) => a.timestamp - b.timestamp);
         logs.splice(0, logs.length - limit);
       }

@@ -2,8 +2,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { setTimeout as waitForProcessTick } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { waitForDead } from "../../test/helpers/process-wait.js";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -19,6 +19,7 @@ import { isPidAlive } from "../shared/pid-alive.js";
 import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
 import { killPidIfAlive } from "../test-utils/process-tree.js";
 import { emitChildProcessSpawnSample, withChildProcessOperation } from "./spawn-diagnostics.js";
+import { createWindowsNpmShim } from "./supervisor/adapters/child.test-support.js";
 
 const mocks = vi.hoisted(() => ({
   signalPtySessionTree: vi.fn(),
@@ -69,22 +70,15 @@ async function spawnDirectTerminalPty(
   }
 }
 
-function createWindowsNpmShim(command: string) {
+async function createTerminalNpmShim(command: string) {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-terminal-pty-shim-"));
   tempDirs.push(binDir);
-  const entrypoint = path.join(binDir, "node_modules", "@openai", command, "bin", `${command}.js`);
-  fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
-  fs.writeFileSync(entrypoint, "", "utf8");
-  const relativeEntrypoint = path.relative(binDir, entrypoint).replaceAll(path.sep, "\\");
-  const shimPath = path.join(binDir, `${command}.cmd`);
-  fs.writeFileSync(
-    shimPath,
-    "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n" +
-      'IF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n)\r\n' +
-      `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" "%dp0%\\${relativeEntrypoint}" %*\r\n`,
-    "utf8",
-  );
-  return { entrypoint, shimPath };
+  const { entrypoint } = await createWindowsNpmShim({
+    binDir,
+    command,
+    packagePath: ["@openai", command, "bin", `${command}.js`],
+  });
+  return { entrypoint, shimPath: path.join(binDir, `${command}.cmd`) };
 }
 
 function fakePty(pid = 4321) {
@@ -147,6 +141,10 @@ describe("terminal PTY spawn diagnostics", () => {
     "counts an admitted %s PTY once with the agent owner",
     async (backend) => {
       const bunDescriptor = Object.getOwnPropertyDescriptor(process.versions, "bun");
+      const bunGlobalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Bun");
+      const bunRuntime =
+        (globalThis as typeof globalThis & { Bun?: { Terminal?: unknown } }).Bun ?? {};
+      const terminalDescriptor = Object.getOwnPropertyDescriptor(bunRuntime, "Terminal");
       Object.defineProperty(process.versions, "bun", {
         configurable: true,
         value: backend === "node-pty" ? undefined : "synthetic-bun",
@@ -156,27 +154,49 @@ describe("terminal PTY spawn diagnostics", () => {
       mocks.spawn.mockReturnValueOnce(pty);
       mocks.spawnBunTerminalPty.mockReturnValueOnce(pty);
       mocks.spawnNodeTerminalPty.mockResolvedValueOnce(pty);
-      vi.stubGlobal(
-        "Bun",
-        backend === "bun-native" ? { Terminal: { prototype: { pause() {} } } } : {},
-      );
+      // The real Bun global is immutable; its Terminal capability is writable.
+      Object.defineProperty(bunRuntime, "Terminal", {
+        ...(terminalDescriptor ?? { configurable: true, writable: true }),
+        value: backend === "bun-native" ? { prototype: { pause() {} } } : undefined,
+      });
+      if (!bunGlobalDescriptor) {
+        vi.stubGlobal("Bun", bunRuntime);
+      }
       try {
+        const aborted = AbortSignal.abort();
+        await expect(
+          spawnTerminalPty(
+            { file: "/bin/bash", args: ["-c", "synthetic"], cols: 80, rows: 24 },
+            { abortSignal: aborted },
+          ),
+        ).rejects.toThrow("PTY construction aborted");
+        expect(mocks.spawn).not.toHaveBeenCalled();
+        expect(mocks.spawnBunTerminalPty).not.toHaveBeenCalled();
+        expect(mocks.spawnNodeTerminalPty).not.toHaveBeenCalled();
         await withChildProcessOperation("agent.exec", () =>
           spawnTerminalPty({ file: "/bin/bash", args: ["-c", "synthetic"], cols: 80, rows: 24 }),
         );
-        platform.mockRestore();
-        now = 60_000;
-        emitChildProcessSpawnSample();
-        expect(events).toEqual([
-          expect.objectContaining({ family: "bash", operation: "agent.exec", count: 1 }),
-        ]);
       } finally {
+        platform.mockRestore();
+        if (terminalDescriptor) {
+          Object.defineProperty(bunRuntime, "Terminal", terminalDescriptor);
+        } else {
+          Reflect.deleteProperty(bunRuntime, "Terminal");
+        }
+        if (!bunGlobalDescriptor) {
+          vi.unstubAllGlobals();
+        }
         if (bunDescriptor) {
           Object.defineProperty(process.versions, "bun", bunDescriptor);
         } else {
           Reflect.deleteProperty(process.versions, "bun");
         }
       }
+      now = 60_000;
+      emitChildProcessSpawnSample();
+      expect(events).toEqual([
+        expect.objectContaining({ family: "bash", operation: "agent.exec", count: 1 }),
+      ]);
     },
   );
 
@@ -359,7 +379,7 @@ describe("terminal PTY invocation", () => {
   it.runIf(process.platform === "win32")(
     "passes arbitrary Codex initial-message text literally through an npm shim",
     async () => {
-      const { entrypoint, shimPath } = createWindowsNpmShim("codex");
+      const { entrypoint, shimPath } = await createTerminalNpmShim("codex");
       const nodePath = resolveTestNodeExecPath();
       mocks.spawn.mockReturnValueOnce(fakePty());
 
@@ -384,7 +404,7 @@ describe("terminal PTY invocation", () => {
   it.runIf(process.platform === "win32")(
     "uses PATH node.exe instead of a packaged non-Node host for an npm shim",
     async () => {
-      const { entrypoint, shimPath } = createWindowsNpmShim("codex");
+      const { entrypoint, shimPath } = await createTerminalNpmShim("codex");
       const nodeDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-terminal-pty-node-"));
       tempDirs.push(nodeDir);
       const nodePath = path.join(nodeDir, "node.exe");
@@ -411,7 +431,7 @@ describe("terminal PTY invocation", () => {
   it.runIf(process.platform === "win32")(
     "fails closed when an npm shim has no Node executable",
     async () => {
-      const { shimPath } = createWindowsNpmShim("codex");
+      const { shimPath } = await createTerminalNpmShim("codex");
       vi.spyOn(process, "execPath", "get").mockReturnValue(
         "C:\\Program Files\\OpenClaw\\openclaw.exe",
       );
@@ -475,20 +495,6 @@ describe("terminal PTY invocation", () => {
     },
   );
 });
-
-// The PTY exit callback owns the shell, but kill() only signals foreign session members.
-async function waitForPidToExit(pid: number, signal: AbortSignal): Promise<void> {
-  try {
-    while (isPidAlive(pid)) {
-      await waitForProcessTick(10, undefined, { signal });
-    }
-  } catch (error) {
-    if (signal.aborted) {
-      throw new Error(`Timed out waiting for PTY descendant ${pid} to exit`, { cause: error });
-    }
-    throw error;
-  }
-}
 
 describe.runIf(process.platform !== "win32")("terminal PTY process-session teardown", () => {
   it("kills a background job in a distinct process group within the PTY session", async ({
@@ -563,7 +569,8 @@ describe.runIf(process.platform !== "win32")("terminal PTY process-session teard
       handle.kill();
       await withinTest(exited.promise, signal);
       expect(isPidAlive(shellPid)).toBe(false);
-      await waitForPidToExit(childPid, signal);
+      // The PTY exit callback owns the shell, but kill() only signals foreign session members.
+      await waitForDead(childPid, signal);
       expect(isPidAlive(childPid)).toBe(false);
     } finally {
       try {

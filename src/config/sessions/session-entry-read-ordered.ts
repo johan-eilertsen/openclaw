@@ -7,7 +7,10 @@ import { getOpenClawAgentDatabaseIfOpen } from "../../state/openclaw-agent-db.js
 import type { AgentDatabaseGenerationClaim } from "../../state/openclaw-agent-execution-admission-contract.js";
 import type { OpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution-contract.js";
 import { runOpenClawAgentWriteAdmissions } from "../../state/openclaw-agent-write-admission.js";
-import type { SessionAccessScope, SessionEntryTargetPatchScope } from "./session-accessor.types.js";
+import type {
+  SessionEntryReadScope,
+  SessionEntryTargetPatchScope,
+} from "./session-accessor.types.js";
 import type { CanonicalSessionReaderContinuation } from "./session-canonical-key.js";
 import { assertSessionEntryCohortScope } from "./session-entry-cohort-scope.js";
 import { SessionEntryChangedDuringReadError } from "./session-entry-read-errors.js";
@@ -43,13 +46,13 @@ type ReadSessionStore = <T>(
 /** Data-only return; decisions/effects consume withRead's synchronous callback directly. */
 export async function readAdmittedSessionEntry(
   reader: SessionEntryCohortReader,
-  input: SessionAccessScope,
+  input: SessionEntryReadScope,
   assertCurrent: () => void,
   onReadTarget?: (target: SessionEntryTargetPatchScope) => void,
 ) {
   assertCurrent();
   const key = assertSessionEntryCohortScope(reader, input);
-  const read = await reader.readEntry(assertCurrent);
+  const read = await reader.readEntry(assertCurrent, input.projection);
   assertCurrent();
   reader.assertCurrent();
   onReadTarget?.({
@@ -89,13 +92,16 @@ export function createAdmittedSessionEntryCohortReader(params: {
       ...new Set([...params.storePaths, database.path].map((p) => path.resolve(p))),
     ]),
     assertCurrent: assertOwnerCurrent,
-    async readEntry(assertCallerCurrent) {
+    async readEntry(assertCallerCurrent, projection) {
       const assertCurrent = () => {
         assertOwnerCurrent();
         assertCallerCurrent();
       };
       assertCurrent();
-      const request = { sessionKeys: [params.sessionKey] };
+      const request = {
+        sessionKeys: [params.sessionKey],
+        snapshotFields: projection === "list" ? [] : projection === "full" ? undefined : projection,
+      };
       const read = await readSessionEntriesWithRetainedFacts(database, request, () =>
         withSessionHistoryWorkerDatabase(
           database,
@@ -176,7 +182,6 @@ export function createAdmittedSessionEntryCohortReader(params: {
                   assertNativeCurrent = undefined;
                 }
               },
-              true,
               signal,
             ),
         },
@@ -216,7 +221,17 @@ export function captureSessionEntryNativeMutationWitness(
 export async function withOrderedSessionEntriesInWorker<T>(
   inputs: readonly SessionEntryWorkerRead[],
   consume: (reads: readonly PreparedSessionEntryWorkerRead[]) => T,
-  { readStore, onReadAdmitted }: { readStore: ReadSessionStore; onReadAdmitted?: () => void },
+  {
+    readStore,
+    onReadAdmitted,
+    prepareConsume,
+    signal,
+  }: {
+    readStore: ReadSessionStore;
+    onReadAdmitted?: () => void;
+    prepareConsume?: () => Promise<void>;
+    signal?: AbortSignal;
+  },
 ): Promise<T> {
   const selected: Array<{
     input: SessionEntryWorkerRead;
@@ -288,6 +303,7 @@ export async function withOrderedSessionEntriesInWorker<T>(
         });
         let active = true;
         const assertCurrent = () => {
+          signal?.throwIfAborted();
           if (!active) {
             throw new Error("Session entry read consumer is no longer active");
           }
@@ -310,16 +326,23 @@ export async function withOrderedSessionEntriesInWorker<T>(
             const cached = readRetainedSessionEntryFacts(database, request);
             const result =
               cached ??
-              (await owner.readExactEntries({
-                ...request,
-                env: database.env,
-                continuation,
-              }));
+              (await owner.readExactEntries(
+                {
+                  ...request,
+                  env: database.env,
+                  continuation,
+                },
+                signal,
+              ));
             assertCurrent();
             if (!cached) {
               retainSessionEntryReadFacts(database, request, result, before);
             }
             reads.push({ result, database, assertCurrent });
+          }
+          if (prepareConsume) {
+            await prepareConsume();
+            assertCurrent();
           }
           const result = consume(reads);
           if (isPromiseLike(result)) {
@@ -332,7 +355,7 @@ export async function withOrderedSessionEntriesInWorker<T>(
           unsubscribe();
         }
       },
-      true,
+      signal,
     );
   };
   return enter(0);

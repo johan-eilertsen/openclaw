@@ -1,5 +1,5 @@
 import { getRuntimeConfig } from "../../config/config.js";
-import { readActiveTranscriptEntryAnchor } from "../../config/sessions/session-accessor.sqlite-transcript-anchor.js";
+import { readActiveTranscriptEntryAnchor } from "../../config/sessions/session-accessor.sqlite-transcript-admitted-read.js";
 import { readActiveTranscriptEntryAnchorAsync } from "../../config/sessions/session-transcript-anchor-read.js";
 import type { TranscriptEntryAnchor } from "../../config/sessions/transcript-entry-anchor.js";
 import { captureOwnedTranscriptWriteAssertion } from "../../config/sessions/transcript-write-context.js";
@@ -97,7 +97,7 @@ function runCoreAgentEndSideEffects(
   }
 }
 
-/** @deprecated Await runAgentEndSideEffectsAsync. Supported through 2026-12-31. */
+/** @deprecated Await runAgentEndSideEffectsAsync. Supported through 2026-12-31. Removal in the first January 2027 stable release. */
 export function runAgentEndSideEffects(params: AgentEndSideEffectsParams): void {
   warnPluginSdkDeprecation({
     family: "agent-end-side-effects",

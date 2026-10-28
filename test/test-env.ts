@@ -5,7 +5,6 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import JSON5 from "json5";
 import { resolveEffectiveHomeDir } from "../src/infra/home-dir.js";
 import { SUPERVISOR_HINT_ENV_VARS } from "../src/infra/supervisor-markers.js";
 import { captureFullEnv, deleteTestEnvValue, setTestEnvValue } from "../src/test-utils/env.js";
@@ -224,6 +223,7 @@ function resolveRestoreEntries(credentialEnvKeys: readonly string[]): RestoreEnt
     { key: "OPENCLAW_STATE_DIR", value: process.env.OPENCLAW_STATE_DIR },
     { key: "OPENCLAW_CONFIG_PATH", value: process.env.OPENCLAW_CONFIG_PATH },
     { key: "OPENCLAW_GATEWAY_PORT", value: process.env.OPENCLAW_GATEWAY_PORT },
+    { key: "OPENCLAW_TELEMETRY_ENDPOINT", value: process.env.OPENCLAW_TELEMETRY_ENDPOINT },
     { key: "OPENCLAW_BRIDGE_ENABLED", value: process.env.OPENCLAW_BRIDGE_ENABLED },
     { key: "OPENCLAW_BRIDGE_HOST", value: process.env.OPENCLAW_BRIDGE_HOST },
     { key: "OPENCLAW_BRIDGE_PORT", value: process.env.OPENCLAW_BRIDGE_PORT },
@@ -267,6 +267,9 @@ function initializeIsolatedTestEnv(tempHome: string, credentialEnvKeys: readonly
   deleteTestEnvValue("OPENCLAW_BRIDGE_HOST");
   deleteTestEnvValue("OPENCLAW_BRIDGE_PORT");
   deleteTestEnvValue("OPENCLAW_CANVAS_HOST_PORT");
+  // Update checks and outcome reports must never reach the production receiver, even
+  // when a case emulates production or spawns a CLI. Nothing listens on the discard port.
+  setTestEnvValue("OPENCLAW_TELEMETRY_ENDPOINT", "http://127.0.0.1:9/openclaw-test-telemetry");
   // Ambient channel credentials can activate real plugins even with an isolated HOME.
   for (const key of ISOLATED_TEST_CREDENTIAL_ENV_KEYS) {
     deleteTestEnvValue(key);
@@ -365,6 +368,7 @@ function restoreClaudeConfigFromBackupIfNeeded(tempHome: string): void {
 }
 
 function sanitizeLiveConfig(raw: string): string {
+  const JSON5 = requireFromHere("json5") as typeof import("json5");
   try {
     const parsed: {
       agents?: {

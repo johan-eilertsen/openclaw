@@ -2,15 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
 import { memorySessionActorOwners } from "../../config/sessions/session-actor-memory-owner.js";
 import type { InternalSessionEntry as SessionEntry } from "../../config/sessions/types.js";
-import type { GatewayRecoveryRuntime } from "../../gateway/server-instance-runtime.types.js";
 import { createMockGatewayRecoveryRuntime } from "../../gateway/server-recovery-runtime.test-support.js";
 import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
+import { CommandLane } from "../../process/lanes.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.paths.js";
 import { resumeMainSession } from "./main-session-restart-dispatch.js";
-import {
-  announceRestartRecoveryResumption,
-  prepareRestartRecoveryDeliveryCurrent,
-} from "./main-session-restart-recovery-delivery.js";
+import { prepareRestartRecoveryDeliveryCurrent } from "./main-session-restart-recovery-delivery.js";
 import {
   prepareExpectedRestartRecoveryCurrent,
   loadExpectedRestartRecoveryTarget,
@@ -87,7 +84,7 @@ describe("memory restart recovery adapters", () => {
     }
   });
 
-  it("passes current send policy to the recovery notice transport after awaited writes", async () => {
+  it("invalidates recovery typing authority when send policy changes", async () => {
     const deliveryContext = { channel: "discord", to: "channel:synthetic" };
     const ready = {
       ...entry,
@@ -106,18 +103,7 @@ describe("memory restart recovery adapters", () => {
     const current = await prepareRestartRecoveryDeliveryCurrent(params);
     try {
       expect(current.isCurrent()).toBe(true);
-      const sendRecoveryNotice = vi.fn<GatewayRecoveryRuntime["sendRecoveryNotice"]>(
-        async (input) => {
-          await upsertSessionEntryCore(scope, { ...ready, sendPolicy: "deny" });
-          expect(input.isCurrent?.({})).toBe(false);
-          return { suppressed: true };
-        },
-      );
-      await announceRestartRecoveryResumption({
-        ...params,
-        gatewayRuntime: createMockGatewayRecoveryRuntime({ sendRecoveryNotice }),
-      });
-      expect(sendRecoveryNotice).toHaveBeenCalledOnce();
+      await upsertSessionEntryCore(scope, { ...ready, sendPolicy: "deny" });
       expect(current.isCurrent()).toBe(false);
       memorySessionActorOwners.closeSession(location, scope.sessionKey);
       expect(current.isCurrent()).toBe(false);
@@ -142,8 +128,9 @@ describe("memory restart recovery adapters", () => {
       entry: { ...entry, restartRecoveryHarnessCompletion: completion },
       observation: { sessionId: entry.sessionId, cycleId: "cycle", revision: 1 },
       recoveryAttempt: 1,
+      lane: CommandLane.Main,
       gatewayRuntime,
-    };
+    } satisfies Parameters<typeof resumeMainSession>[0];
     expect(await resumeMainSession(params)).toBe("skipped");
     expect(memorySessionActorOwners.read(location)).toBeUndefined();
     await upsertSessionEntryCore(scope, params.entry);
@@ -151,16 +138,7 @@ describe("memory restart recovery adapters", () => {
       ...entry,
       restartRecoveryHarnessCompletion: undefined,
     });
-    expect(
-      await resumeMainSession({
-        ...params,
-        recoveryAdmission: {
-          handoffId: "synthetic-admission",
-          shouldContinue: () => true,
-          beginDispatch: () => true,
-        },
-      }),
-    ).toBe("skipped");
+    expect(await resumeMainSession(params)).toBe("skipped");
     expect(gatewayRuntime.dispatchAgent).not.toHaveBeenCalled();
   });
 });

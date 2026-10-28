@@ -1,10 +1,9 @@
-import { createTestPluginServiceScheduler } from "openclaw/plugin-sdk/plugin-test-api";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { useTlonMonitorFixture } from "./monitor.test-harness.js";
 
 const {
-  monitorTlonProvider,
+  startMonitor,
   authenticateMock,
   sseClientMock,
   ingressMock,
@@ -17,20 +16,12 @@ const OWNER = "~nec";
 const CLUB_ID = "0v3.q4n5m.6r7s8.9t0u1.2v3w4";
 
 async function withMonitor(run: (runtime: RuntimeEnv) => Promise<void>) {
-  const controller = new AbortController();
-  const runtime = { error: vi.fn(), exit: vi.fn(), log: vi.fn() } satisfies RuntimeEnv;
-  const monitor = monitorTlonProvider({
-    scheduler: createTestPluginServiceScheduler(),
-    abortSignal: controller.signal,
-    runtime,
-  });
-  void monitor.catch(() => {});
+  const { runtime, stop } = startMonitor();
   try {
     await vi.waitFor(() => expect(sseClientMock.connect).toHaveBeenCalledOnce());
     await run(runtime);
   } finally {
-    controller.abort();
-    await monitor;
+    await stop();
   }
 }
 
@@ -171,14 +162,17 @@ describe("monitorTlonProvider club (group DM) sender identity", () => {
 
   it("still runs owner admin commands from the owner's 1:1 DM", async () => {
     startMonitorDefaults();
-    await withMonitor(async () => {
+    await withMonitor(async (runtime) => {
+      const command = "  PeNdInG  ";
       sseClientMock.poke.mockClear();
       await chatSubscription().event(
-        chatEvent({ whom: OWNER, author: OWNER, text: "pending", id: "~nec/6" }),
+        chatEvent({ whom: OWNER, author: OWNER, text: command, id: "~nec/6" }),
       );
 
       expect(pokedTexts()).toContain("No pending approval requests.");
       expect(inboundRuntimeMock.dispatch).not.toHaveBeenCalled();
+      expect(runtime.log).toHaveBeenCalledWith("[tlon] Processed admin command from owner");
+      expect(JSON.stringify(vi.mocked(runtime.log!).mock.calls)).not.toContain(command);
     });
   });
   it("replays an approved club claim with the club identity, never the claimed ship", async () => {
@@ -280,10 +274,14 @@ describe("monitorTlonProvider club (group DM) sender identity", () => {
         ],
       });
       ingressMock.receive.mockResolvedValue({ kind: "ignored" });
-      await withMonitor(async () => {
+      await withMonitor(async (runtime) => {
         sseClientMock.poke.mockClear();
         await chatSubscription().event(
           chatEvent({ whom: OWNER, author: OWNER, text: "approve dm-legacy", id: "~nec/11" }),
+        );
+        expect(runtime.log).toHaveBeenCalledWith("[tlon] Processed approval response from owner");
+        expect(JSON.stringify(vi.mocked(runtime.log!).mock.calls)).not.toContain(
+          "approve dm-legacy",
         );
         const allowlistWrite = sseClientMock.poke.mock.calls
           .map(([payload]) => (payload as { json?: Record<string, unknown> }).json?.["put-entry"])
