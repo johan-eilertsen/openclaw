@@ -6,19 +6,19 @@ import {
   apiThrottler,
   resetTelegramAccountThrottlersForTest,
   loadTelegramSendHttpFixture,
-} from "../../../extensions/telegram/test-api.js";
-import { createDeferred } from "../../../test/helpers/promise.js";
-import { resolveOpenClawPluginToolsForOptions } from "../../agents/openclaw-plugin-tools.js";
-import { setActivePluginRegistry } from "../../plugins/runtime.js";
-import type { OpenClawPluginToolDelivery } from "../../plugins/tool-types.js";
-import { createTestRegistry } from "../../test-utils/channel-plugins.js";
-import * as execution from "./agent-runner-execution.test-support.js";
+} from "../extensions/telegram/test-api.js";
+import { resolveOpenClawPluginToolsForOptions } from "../src/agents/openclaw-plugin-tools.js";
+import * as execution from "../src/auto-reply/reply/agent-runner-execution.test-support.js";
+import { setActivePluginRegistry } from "../src/plugins/runtime.js";
+import type { OpenClawPluginToolDelivery } from "../src/plugins/tool-types.js";
+import { createTestRegistry } from "../src/test-utils/channel-plugins.js";
+import { createDeferred } from "./helpers/promise.js";
 const capture = vi.hoisted(() => ({
   delivery: undefined as OpenClawPluginToolDelivery | undefined,
 }));
 // mock-isolation: Capture host context only; real delivery, authority, adapter and HTTP.
-vi.mock("../../plugins/tools.js", async (original) => ({
-  ...(await original<typeof import("../../plugins/tools.js")>()),
+vi.mock("../src/plugins/tools.js", async (original) => ({
+  ...(await original<typeof import("../src/plugins/tools.js")>()),
   resolvePluginTools: ({ context }: { context: { delivery?: OpenClawPluginToolDelivery } }) => {
     capture.delivery = context.delivery;
     return [];
@@ -26,8 +26,9 @@ vi.mock("../../plugins/tools.js", async (original) => ({
 }));
 const state = await execution.setupAgentRunnerExecutionTestState();
 const execute = await execution.getExecuteAgentTurnForTest();
-const { mintReplyMessageActionTurnCapability } =
-  await vi.importActual<typeof import("./agent-runner-utils.js")>("./agent-runner-utils.js");
+const { mintReplyMessageActionTurnCapability } = await vi.importActual<
+  typeof import("../src/auto-reply/reply/agent-runner-utils.js")
+>("../src/auto-reply/reply/agent-runner-utils.js");
 const { useTelegramHttpFixture } = await loadTelegramSendHttpFixture();
 const fixture = useTelegramHttpFixture();
 const key = "agent:main:telegram:direct:123"; // synthetic
