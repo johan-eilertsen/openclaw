@@ -10,6 +10,7 @@ import type { LegacyStateMigrationPlan } from "../infra/state-migrations.types.j
 import { CONTROL_PLANE_UPDATE_SENTINEL_META_ENV } from "../infra/update-control-plane-sentinel.js";
 import { getUpdateRun } from "../infra/update-run-ledger.js";
 import {
+  closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
@@ -96,11 +97,8 @@ function runUpdateProcess(
   env: NodeJS.ProcessEnv = {},
   preload?: string,
 ) {
-  const configPath = path.join(root, "config", "openclaw.json");
-  const stateDir = path.join(root, "state");
-  const entryPath = path.resolve("openclaw.mjs");
   return runCliProcessChild({
-    nodeArgs: [...(preload ? ["--import", preload] : []), entryPath, ...args],
+    nodeArgs: [...(preload ? ["--import", preload] : []), path.resolve("openclaw.mjs"), ...args],
     env: {
       ...process.env,
       ...clearedChildEnv,
@@ -109,11 +107,11 @@ function runUpdateProcess(
       NODE_DISABLE_COMPILE_CACHE: "1",
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
       NO_COLOR: "1",
-      OPENCLAW_CONFIG_PATH: configPath,
+      OPENCLAW_CONFIG_PATH: path.join(root, "config", "openclaw.json"),
       OPENCLAW_HIDE_BANNER: "1",
       OPENCLAW_HOME: root,
       OPENCLAW_NO_RESPAWN: "1",
-      OPENCLAW_STATE_DIR: stateDir,
+      OPENCLAW_STATE_DIR: path.join(root, "state"),
       ...env,
     },
     maxBuffer: 4 * 1024 * 1024,
@@ -126,9 +124,8 @@ async function expectUnrecordedPreview(root: string, before: string[]): Promise<
 
   const status = await runUpdateProcess(root, ["update", "status", "--timeout", "1", "--json"]);
   expect(status.code, status.stderr).toBe(0);
-  const report = JSON.parse(status.stdout);
-  expect(report.activeRun).toBeUndefined();
-  expect(report.lastRun).toBeUndefined();
+  const { activeRun, lastRun } = JSON.parse(status.stdout);
+  expect([activeRun, lastRun]).toEqual([undefined, undefined]);
   expect(await snapshotTree(root)).toEqual(before);
 }
 
@@ -233,30 +230,72 @@ setLoggerOverride({ file: ${JSON.stringify(path.join(logs, "openclaw.log"))} });
   );
 
   it.each([
-    { name: "malformed", command: "update", config: "{ definitely-not-json\n" },
-    {
-      name: "migration-pending",
-      command: "--update",
-      config:
-        '{ "heartbeat": { "model": "anthropic/claude-3-5-haiku-20241022", "every": "30m" } }\n',
-    },
-  ])("keeps $name config and state immutable during preview", async ({ name, command, config }) => {
-    const { root, stateDir } = await createStateFixture(`openclaw-update-${name}-`, config);
-    if (command === "--update") {
-      await writeFixture(
-        path.join(stateDir, "tasks", "runs.sqlite.migrated"),
-        "legacy migration marker\n",
+    { initialized: false, json: false },
+    { initialized: false, json: true },
+    { initialized: true, json: false },
+    { initialized: true, json: true },
+  ])(
+    "keeps malformed previews artifact-free (DB=$initialized, JSON=$json)",
+    async ({ initialized, json }) => {
+      const { root, stateDir } = await createStateFixture(
+        "openclaw-update-malformed-",
+        "{ definitely-not-json\n",
       );
-      await writeFixture(path.join(stateDir, "tasks", "runs.sqlite-wal"), "legacy WAL marker\n");
-    }
+      await fs.mkdir(path.join(root, "cache"));
+      await fs.mkdir(path.join(root, "tmp"));
+      if (initialized) {
+        openOpenClawStateDatabase({ env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } });
+        await closeOpenClawStateDatabaseAsync();
+      }
+      const preload = path.join(root, "observe.mjs");
+      await fs.writeFile(
+        preload,
+        `import { channel } from "node:diagnostics_channel";
+channel("openclaw.database.statement").subscribe(() => process.stderr.write("DATABASE_INSPECTION\\n"));
+// The launcher probes SQLite capabilities in memory before loading configuration.
+channel("sqlite.db.query").subscribe(({ database }) => {
+  if (database.location()) process.stderr.write("DATABASE_INSPECTION\\n");
+});
+`,
+      );
+      const before = await snapshotTree(root);
+      const result = await runUpdateProcess(
+        root,
+        ["update", "--dry-run", "--no-restart", "--timeout", "1", ...(json ? ["--json"] : [])],
+        { XDG_CACHE_HOME: path.join(root, "cache"), TMPDIR: path.join(root, "tmp") },
+        preload,
+      );
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain("Would refuse update:");
+      if (json) {
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          dryRun: true,
+          runId: expect.any(String),
+          actions: expect.arrayContaining([expect.any(String)]),
+        });
+      }
+      expect(result.stderr).not.toContain("DATABASE_INSPECTION");
+      for (const artifact of ["update-reports", "logs/support"]) {
+        expect(await fs.stat(path.join(stateDir, artifact)).catch(() => undefined)).toBeUndefined();
+      }
+      expect(await snapshotTree(root)).toEqual(before);
+    },
+  );
+
+  it("keeps migration-pending config and state immutable during preview", async () => {
+    const { root, stateDir } = await createStateFixture(
+      "openclaw-update-migration-pending-",
+      '{ "heartbeat": { "model": "anthropic/claude-3-5-haiku-20241022", "every": "30m" } }\n',
+    );
+    const legacyStore = path.join(stateDir, "tasks", "runs.sqlite");
+    await writeFixture(`${legacyStore}.migrated`, "legacy migration marker\n");
+    await writeFixture(`${legacyStore}-wal`, "legacy WAL marker\n");
     const treeBefore = await snapshotTree(root);
-    const result = await runPreview(root, command);
+    const result = await runPreview(root, "--update");
     expect(result.code, result.stderr).toBe(0);
-    const preview = JSON.parse(result.stdout);
-    expect(preview).toMatchObject({
+    expect(JSON.parse(result.stdout)).toMatchObject({
       runId: expect.any(String),
       dryRun: true,
-      ...(command === "update" ? { actions: expect.arrayContaining([expect.any(String)]) } : {}),
     });
     await expectUnrecordedPreview(root, treeBefore);
   });

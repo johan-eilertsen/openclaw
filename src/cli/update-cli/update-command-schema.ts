@@ -3,6 +3,7 @@ import { theme } from "../../../packages/terminal-core/src/theme.js";
 import type { LegacyConfigUpdatePlan } from "../../commands/doctor/legacy-config-repair.js";
 import { resolveStateDir } from "../../config/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { getScopedDatabaseEngineSelection } from "../../infra/database-engine/context.js";
 import { tryReadJson } from "../../infra/json-files.js";
 import { readPackageName } from "../../infra/package-json.js";
 import { checkGlobalPackageUpdateAdmission } from "../../infra/package-update-manager-preflight.js";
@@ -179,7 +180,10 @@ export async function previewUpdateCommand(params: {
       );
     }
 
-    const run = getUpdateRun(params.runId, { env: opts.run?.env });
+    // Unreadable authored config leaves the engine unresolved; prepared facts suffice.
+    const run = getScopedDatabaseEngineSelection()
+      ? getUpdateRun(params.runId, { env: opts.run?.env })
+      : undefined;
     const targetVersionReason = target.targetVersion
       ? undefined
       : target.updateInstallKind === "git"
@@ -254,6 +258,7 @@ export async function previewUpdateCommand(params: {
           durationMs: 0,
         },
         opts,
+        { record: run, readHistory: false },
       );
     }
   }
@@ -330,6 +335,7 @@ export async function preflightUpdateCommandSchemas(params: {
       const admission = await inspectUpdateDatabaseContexts({
         roots: switchToGit ? [root, resolveGitInstallDir()] : [root],
         updateInstallKind,
+        packageAlreadyCurrent: params.packageAlreadyCurrent,
         shouldRestart,
         jsonMode: Boolean(opts.json),
         timeoutMs: updateStepTimeoutMs,
@@ -365,7 +371,12 @@ export async function preflightUpdateCommandSchemas(params: {
               channel,
               devTarget,
             })
-          : { schemaVersions: packageTargetSchemaVersions };
+          : {
+              // A no-op keeps the installed runtime, even if registry metadata describes an older build.
+              schemaVersions: params.packageAlreadyCurrent
+                ? undefined
+                : packageTargetSchemaVersions,
+            };
       if ("metadataUnreadable" in target && target.metadataUnreadable) {
         preflightNotes.push(
           "Node compatibility was not checked because the Git target metadata is unavailable.",
