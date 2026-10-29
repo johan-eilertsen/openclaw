@@ -1,6 +1,5 @@
 // These consumers need the host-owned SQLite broker, which runs in forked processes.
 export const databaseWorkerCoreTestFiles = [
-  "src/auto-reply/reply/agent-runner-reply-authority.telegram-http.test.ts",
   "src/agents/subagents/registry/subagent-controller-inputs.test.ts",
   "src/commands/doctor/shared/model-replacement.test.ts",
   "src/infra/database-engine/memory-path-migration.conformance.test.ts",
@@ -675,6 +674,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/auto-reply/reply/agent-runner-execution-lifecycle.test.ts",
   "src/auto-reply/reply/agent-runner-execution-mcp-context.test.ts",
   "src/auto-reply/reply/agent-runner-execution-message-authority.test.ts",
+  "src/auto-reply/reply/agent-runner-reply-authority.telegram-http.test.ts",
   "src/auto-reply/reply/agent-runner-execution-message-tools.test.ts",
   "src/auto-reply/reply/agent-runner-execution-probes.test.ts",
   "src/auto-reply/reply/agent-runner-execution-progress.test.ts",
