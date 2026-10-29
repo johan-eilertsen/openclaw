@@ -1,5 +1,5 @@
---- telegram-direct-codex-message-tool.md	sha256=f18a5bf38dbf99ef3f4973e445691662c2e77a873bfde1dde6df4ecda6d1c185
-+++ discord-group-codex-message-tool.md	sha256=a17079fdb522d6f5e76984070e32c43907629872a8040dbc0e654fabe99cae04
+--- telegram-direct-codex-message-tool.md	sha256=e282d02610ae7464c8836e8bb36e3912ce7cd509aece0c67b305ab4cfcfcff84
++++ discord-group-codex-message-tool.md	sha256=8b11b1d09e42a2f30f5bb6eda158cce938b9bb0b2566a4eac6c636e9705bc30e
 @@ -1,1 +1,1 @@
 -# Telegram Direct Codex Message Tool Turn
 +# Discord Group Codex Message Tool Turn
@@ -34,10 +34,10 @@
 +    "chars": 972,
 +    "roughTokens": 243
 @@ -262,2 +262,2 @@
--    "chars": 84730,
--    "roughTokens": 21183
-+    "chars": 85364,
-+    "roughTokens": 21341
+-    "chars": 85057,
+-    "roughTokens": 21265
++    "chars": 85691,
++    "roughTokens": 21423
 @@ -266,2 +266,2 @@
 -    "chars": 3490,
 -    "roughTokens": 873
@@ -49,10 +49,10 @@
 +    "chars": 29106,
 +    "roughTokens": 7277
 @@ -278,2 +278,2 @@
--    "chars": 112233,
--    "roughTokens": 28059
-+    "chars": 114472,
-+    "roughTokens": 28618
+-    "chars": 112560,
+-    "roughTokens": 28140
++    "chars": 114799,
++    "roughTokens": 28700
 @@ -282,2 +282,2 @@
 -    "chars": 879,
 -    "roughTokens": 220

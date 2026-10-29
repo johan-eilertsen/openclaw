@@ -85,6 +85,16 @@ compatible process helper, wait for the recorded driver to exit, then run
 `openclaw update repair`. Doctor reports the native load failure and runtime
 glibc version when available.
 
+SQLite update backup admission measures database and journal families, reserves the
+retained backup and writable rollback images, and sizes history scratch from shared
+state rather than a large agent database. Actual rollback output space is checked
+again before current databases move. A disk-space refusal retains the required and
+available capacity and the backup or rollback volume role in the package-swap failure
+fact without exposing private paths. The candidate worker and installed updater
+must contain the diagnostic repair; an older updater cannot gain it from a newer
+candidate alone. If capture refuses before the package changes, final recovery
+restarts and verifies the previous owned Gateway unless recorded data is at risk.
+
 When artifact-preserving SQLite inspection exhausts its stabilization attempts,
 update failures retain the final consistency reason code and attempt count in
 `openclaw update status` and the prepared failure report. The candidate worker
@@ -1847,6 +1857,15 @@ when every plugin migration phase reports no remaining work and its settings
 validate. It does not run offline repairs. A remaining migration stays pending
 with its phase named in the Gateway log. An explicit state-migration obligation
 also stays pending if the installed plugin no longer supplies its detector.
+Doctor settles an unused or disabled unavailable plugin's pending upgrade when
+there are no retained settings to migrate, even if an earlier update recorded a
+required migration. It keeps existing plugin state and defers required migration
+or inspection until the plugin is active. Installing or enabling that plugin
+does not bypass its migration: runtime admission holds it until Doctor migrates
+the state or confirms it is already ready. This deferral clears the inactive
+plugin's repair warning without claiming its state was migrated.
+Active plugins and retained settings still require their
+migration owner; Doctor names the install or enable step when that owner is missing.
 For a systemd system unit, Doctor
 checks stop permission before draining the Gateway; an unprivileged run names
 the `sudo systemctl stop <unit>` command for the service owner. Run Doctor as the
