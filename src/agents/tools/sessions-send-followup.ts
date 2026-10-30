@@ -16,7 +16,10 @@ import {
   getGatewayToolCallerIdentity,
   prepareGatewayToolCallerAssertion,
 } from "./gateway-caller-context.js";
-import { runWithGatewayToolCleanupContext } from "./in-process-gateway.js";
+import {
+  getInProcessGatewayToolContext,
+  runWithGatewayToolCleanupContext,
+} from "./in-process-gateway.js";
 import { prepareSessionsSendFollowup } from "./sessions-send-followup-custody.js";
 import { startSessionsSendReplyFlow } from "./sessions-send-reply-flow.js";
 import {
@@ -51,7 +54,7 @@ export async function startSessionsSendFollowup(
         targetAgentId: request.targetAgentId,
         requesterAgentId: request.requesterAgentId,
         requesterSessionKey: request.requesterSessionKey,
-        replyMode: request.visibleReply ? "peer" : "one-way",
+        replyMode: replyContext.replyMode === "peer" ? "peer" : "one-way",
         notifyRequesterOnWaitFailure: true,
       });
       return {
@@ -140,10 +143,18 @@ export async function dispatchSessionsSendFollowup(
     !isInternalMessageChannel(replyContext.requesterOrigin.channel) &&
     getGatewayToolCallerIdentity()?.sessionEventDelivery !== false,
   );
+  // A queued self-send has no separate recipient to observe it with operator.write.
+  // Keep the original run's result, without registering the session as its own child.
+  const ownSessionCompletion =
+    replyContext.replyMode === "peer" &&
+    options.requesterSessionKey === params.sessionStoreTarget.canonicalKey &&
+    options.requesterAgentId === params.sendParams.agentId &&
+    getInProcessGatewayToolContext()?.lifecycleRuntime !== undefined;
   const request =
     !("ok" in active) &&
     (registryTurn ||
       visiblePeerReply ||
+      ownSessionCompletion ||
       (replyContext.replyMode === "one-way" && options.ownChild)) &&
     sameRequester
       ? await prepareSessionsSendFollowup({

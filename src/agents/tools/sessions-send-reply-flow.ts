@@ -45,9 +45,12 @@ export function startSessionsSendReplyFlow(
     return Promise.resolve();
   }
   const { completion } = params;
+  // Visible channel returns retain their receipt owner; ordinary peers keep session authority.
+  const requesterCompletion =
+    params.replyMode !== "peer" || completion?.request.visibleReply ? completion : undefined;
   const continueOwned = async <T>(run: () => Promise<T>) =>
-    completion
-      ? completion.request.custody.run(run)
+    requesterCompletion
+      ? requesterCompletion.request.custody.run(run)
       : runWithGatewayToolContinuationContext(
           run,
           params.replyMode === "peer" ? { retainRequester: true } : undefined,
@@ -56,15 +59,15 @@ export function startSessionsSendReplyFlow(
     const settledReply = params.reply ?? (await completion?.take());
     const deliverRequesterReply: Parameters<
       typeof runSessionsSendA2AFlow
-    >[0]["deliverRequesterReply"] = completion
+    >[0]["deliverRequesterReply"] = requesterCompletion
       ? async ({ message, extraSystemPrompt }) => {
           const {
             runAnnounceAgentCall,
             isGatewayAgentRunPending,
             resolvePrivateCompletionDeliveryResult,
           } = await import("../subagents/announce/subagent-announce-completion-delivery.js");
-          completion.assertCurrent();
-          const request = completion.request;
+          requesterCompletion.assertCurrent();
+          const request = requesterCompletion.request;
           const idempotencyKey = `announce:sessions-send:${request.runId}:completion`;
           const timeoutMs = resolveSubagentAnnounceTimeoutMs(getRuntimeConfig());
           if (request.visibleReply) {
@@ -72,7 +75,7 @@ export function startSessionsSendReplyFlow(
               await import("../subagents/announce/subagent-announce-direct-delivery.js");
             const isCurrent = () => {
               try {
-                completion.assertCurrent();
+                requesterCompletion.assertCurrent();
                 return true;
               } catch {
                 return false;
@@ -100,11 +103,11 @@ export function startSessionsSendReplyFlow(
                 requesterIsSubagent: false,
                 directIdempotencyKey: idempotencyKey,
                 directOrigin: params.requesterOrigin,
-                signal: completion.signal,
+                signal: requesterCompletion.signal,
                 isSourceSessionEffectsAllowed: isCurrent,
                 isSourceSessionAdmissionAllowed: isCurrent,
               });
-            const delivery = await completion.withRequesterRun(idempotencyKey, () =>
+            const delivery = await requesterCompletion.withRequesterRun(idempotencyKey, () =>
               request.requesterAuthority
                 ? request.requesterAuthority.run(idempotencyKey, deliver)
                 : deliver(),
