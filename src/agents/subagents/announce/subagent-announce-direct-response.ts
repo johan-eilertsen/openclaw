@@ -94,6 +94,18 @@ export function createDirectAnnounceResponseClassifier(context: DirectAnnounceRe
 
     const directAnnounceResult = getGatewayAgentResult(directAnnounceResponse);
     const directAnnounceRecord = asOptionalRecord(directAnnounceResponse);
+    if (
+      directAnnounceRecord?.status === "ok" &&
+      directAnnounceResult?.meta?.inputAlreadyDelivered === true &&
+      !directAnnounceResult.meta.error &&
+      !directAnnounceResult.meta.aborted &&
+      directAnnounceResult.meta.yielded !== true &&
+      directAnnounceResult.meta.continuationPending !== true
+    ) {
+      // The host matched this exact input to a committed completion. This is
+      // an idempotent acknowledgment, not authored silence or a new visible final.
+      return buildRequesterCompletionDeliveryResult(false, undefined);
+    }
     const effectiveReplyExpectation =
       directAnnounceResult?.meta?.terminalReplyExpectation === "result-required"
         ? "result-required"
