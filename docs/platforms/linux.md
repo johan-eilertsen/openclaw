@@ -649,7 +649,21 @@ enables isolation. Without writable delegation, OpenClaw leaves the cgroup
 layout unchanged and reports the missing prerequisite once at startup.
 
 OpenClaw places host agent-exec process trees in the sibling `agent-exec` cgroup.
-Its CPU weight is `10`, compared with the Gateway leaf's default `100`; these are
+Placement follows the launch caller's typed execution intent: agent tool commands
+and their PTYs enter `agent-exec`; Gateway-internal commands stay in `gateway`.
+This includes managed worktree preparation, base refresh and hydration, Git
+status and diff RPCs, and sandbox synchronization helpers. Executable names,
+arguments, and cleanup ownership do not select the cgroup. Descendants inherit
+their command's placement.
+
+On Node, the Gateway's existing spawn broker launches supported child commands
+and PTY helpers without forking the Gateway's large address space. Durable-process
+observation and cron command watchers retain that broker across detached timers
+and queues. This changes the launch process, not execution intent: durable
+`systemctl` helpers remain Gateway work, while durable commands themselves remain
+independent systemd user services.
+
+The `agent-exec` CPU weight is `10`, compared with the Gateway leaf's default `100`; these are
 relative shares during contention, not a fixed CPU cap. Aggregate `memory.high`
 reuses the host exec memory allowance: the smaller of one quarter of available
 host/container memory and half that memory remaining after Gateway RSS.

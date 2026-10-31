@@ -47,6 +47,7 @@ import {
   type SessionStopRequest,
 } from "../../sessions/session-controller.stop.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import { stopSkillExperienceReview } from "../../skills/workshop/experience-review-default.js";
 import { resolveCommandAuthorizationAsync } from "../command-auth.js";
 import { resolveAbortCutoffFromContext, shouldPersistAbortCutoff } from "./abort-cutoff.js";
 import { setAbortMemory } from "./abort-primitives.js";
@@ -56,15 +57,32 @@ import { resolveEffectiveResetTargetSessionKey } from "./acp-reset-target.js";
 import { resolveSessionConversationBindingContext } from "./session-conversation-binding.js";
 
 type ChannelStopTarget = SessionControllerInput | ReplyOperation;
+/** Selected agent/session pair whose Workshop review this Stop cancels. */
+type ChannelStopReviewTarget = { agentId: string; sessionKey: string };
 export type ChannelStopCapture = {
   controller: SessionControllerStopCapture;
   sessionId?: string;
+  /** One entry per combined capture: every selected conversation keeps its review identity. */
+  reviewTargets: readonly ChannelStopReviewTarget[];
   mcpSessionIds: ReadonlyMap<ChannelStopTarget, readonly string[]>;
   idleMcpRetirements: readonly NonNullable<ReturnType<typeof captureSessionMcpRuntimeRetirement>>[];
   commands: readonly ReturnType<typeof captureExecRequestCancellation>[];
   requestRunIds: ReadonlySet<string>;
   followups: readonly FollowupCompletionOwner[];
 };
+
+function mergeStopReviewTargets(
+  targets: Iterable<{ agentId?: string; sessionKey?: string }>,
+): ChannelStopReviewTarget[] {
+  const merged = new Map<string, ChannelStopReviewTarget>();
+  for (const { agentId, sessionKey } of targets) {
+    if (!agentId || !sessionKey) {
+      continue;
+    }
+    merged.set(`${agentId}\u0000${sessionKey}`, { agentId, sessionKey });
+  }
+  return [...merged.values()];
+}
 
 function matchesStopCandidate(
   candidate: Pick<
@@ -195,6 +213,11 @@ function captureChannelStopResources(
     controller,
     followups,
     sessionId: selectedSessionId,
+    reviewTargets: mergeStopReviewTargets(
+      commandTarget
+        ? [{ agentId: commandTarget.agentId, sessionKey: commandTarget.sessionKey }]
+        : [],
+    ),
     mcpSessionIds,
     idleMcpRetirements: idleMcpRetirement ? [idleMcpRetirement] : [],
     commands,
@@ -214,6 +237,7 @@ function combineChannelStopCaptures(captures: readonly ChannelStopCapture[]): Ch
       effects: captures.flatMap((capture) => [...capture.controller.effects]),
       pendingCaptures: captures.map((capture) => capture.controller),
     }),
+    reviewTargets: mergeStopReviewTargets(captures.flatMap((capture) => capture.reviewTargets)),
     mcpSessionIds: new Map(captures.flatMap((capture) => [...capture.mcpSessionIds])),
     idleMcpRetirements: captures.flatMap((capture) =>
       capture.idleMcpRetirements.filter((retirement) => retirement.sessionId === capture.sessionId),
@@ -301,6 +325,9 @@ export function abortSessionRunTargetWithOutcome(params: {
     },
     afterQueued: () => {
       const capture = resolveCapture();
+      // The Stop kernel calls afterQueued only after revalidating the captured Stop's live
+      // target, so review cancellation cannot outrun a rejected foreground cancellation.
+      stopSkillExperienceReview({ sessions: capture.reviewTargets, runIds: capture.requestRunIds });
       for (const retirement of capture.idleMcpRetirements) {
         trackRetirement(retirement.sessionId, () =>
           retirement.retire(() => params.assertCurrent?.()),
@@ -550,17 +577,23 @@ export async function executeFastAbortRequest(
               const boundStorePath = resolveSessionStorePathCore(cfg.session?.store, {
                 agentId: boundAgentId,
               });
-              captures.push(
-                ...boundCandidates
-                  .filter((candidate) =>
-                    matchesStopCandidate(candidate, {
-                      key: boundKey,
-                      storePath: boundStorePath,
-                      agentId: boundAgentId,
-                    }),
-                  )
-                  .map((candidate) => candidate.channel),
-              );
+              for (const candidate of boundCandidates) {
+                if (
+                  matchesStopCandidate(candidate, {
+                    key: boundKey,
+                    storePath: boundStorePath,
+                    agentId: boundAgentId,
+                  })
+                ) {
+                  captures.push({
+                    ...candidate.channel,
+                    reviewTargets: mergeStopReviewTargets([
+                      ...candidate.channel.reviewTargets,
+                      { agentId: candidate.agentId ?? boundAgentId, sessionKey: boundKey },
+                    ]),
+                  });
+                }
+              }
             }
             if (
               sourceCapture &&
