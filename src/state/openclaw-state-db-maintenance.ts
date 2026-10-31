@@ -5,10 +5,12 @@ import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-syn
 import { isPostgresSqlConnection, type EngineConnection } from "../infra/sql-connection.js";
 import { assertSqliteTableIntegrity } from "../infra/sqlite-integrity.js";
 import { OpenClawStateOwnershipError } from "../infra/sqlite-lifecycle-errors.js";
+import { withSqliteWritableSchema } from "../infra/sqlite-schema-catalog.js";
 import {
   assertSqliteSchemaContains,
   assertSqliteSchemaTablesPresent,
   collectSqliteSchemaIssues,
+  createSqliteTableContractReader,
   getCanonicalSqliteNamedIndexContracts,
   type SqliteTableContractReader,
 } from "../infra/sqlite-schema-contract.js";
@@ -38,8 +40,8 @@ import * as cronIdentity from "./openclaw-state-db-cron-identity-migration.js";
 import {
   hasDanglingSkillWorkshopCollectionReviewIndex,
   LEGACY_SKILL_WORKSHOP_COLLECTION_REVIEWS_INDEX,
-  withSqliteWritableSchema,
 } from "./openclaw-state-db-doctor-schema.js";
+import { migrateHistoricalStateImports } from "./openclaw-state-db-historical-imports.js";
 import { stateIndexOrderingMigrations } from "./openclaw-state-db-index-ordering-migrations.js";
 import { migrateMeetingTranscriptStartTime } from "./openclaw-state-db-meeting-chronology-migration.js";
 import {
@@ -63,7 +65,10 @@ import {
   migrateStateWriteIndexesV27,
   withLegacyStateWriteIndexes,
 } from "./openclaw-state-db-schema-v27-indexes.js";
-import { statePublicationDraftMigration } from "./openclaw-state-db-schema-v28-publication.js";
+import {
+  needsPublicationDraftMigration,
+  statePublicationDraftMigration,
+} from "./openclaw-state-db-schema-v28-publication.js";
 import {
   stateLocalWorkspaceManifestMigration,
   withLegacyLocalWorkspaceManifests,
@@ -85,6 +90,7 @@ import {
 import type { DB } from "./openclaw-state-db.generated.js";
 import { assertOpenClawStateWriteAllowed } from "./openclaw-state-ownership.js";
 import {
+  findMissingLazyStateStartupColumn,
   getOpenClawStateRuntimeSchema,
   OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY,
   STATE_RUNTIME_SCHEMA_COMPATIBILITY,
@@ -435,9 +441,7 @@ function migrateGitHubPublicationRequesterAuthority(
     "github_publication_session_lifecycles",
     "github_repository_publication_requests",
   ]) {
-    if (tableExists(db, table)) {
-      changed = ensureColumn(db, table, "requester_authority_json TEXT") || changed;
-    }
+    changed = ensureColumn(db, table, "requester_authority_json TEXT") || changed;
   }
   return changed;
 }
@@ -595,6 +599,8 @@ export function migrateBoundedStateSchema(
   if (
     !options.versionMigrationOnly &&
     (tableExists(db, "cron_run_logs") ||
+      (!pending.includes(statePublicationDraftMigration) && needsPublicationDraftMigration(db)) ||
+      findMissingLazyStateStartupColumn(createSqliteTableContractReader(db)) !== undefined ||
       collectSqliteSchemaIssues(db, sourceSchema, {
         ...withLegacyTemplateStateCompatibility(STATE_RUNTIME_SCHEMA_COMPATIBILITY),
         allowedMissingColumns: [
@@ -617,7 +623,8 @@ export function migrateBoundedStateSchema(
   ) {
     return undefined;
   }
-  const changes: string[] = [];
+  // Consume the historical data shape before publishing a newer version marker.
+  const changes = migrateHistoricalStateImports(db, previousVersion);
   for (const migration of pending) {
     migration.migrate(db, previousVersion, options);
     changes.push(migration.applied);
